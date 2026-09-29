@@ -158,6 +158,23 @@ describe("calculateHealthResult", () => {
     ).toThrow("target BMI");
   });
 
+  it("rejects_finite_but_nonviable_bmr_and_calorie_combinations", () => {
+    const invalidCombination = {
+      ...baseInput,
+      age: 120,
+      heightCm: 60,
+      weightKg: 20,
+      targetWeightKg: 20,
+      activityLevel: "sedentary" as const,
+      goal: "keep_fit" as const,
+    };
+
+    expect(() => calculateHealthResult(invalidCombination)).toThrow(/positive|finite/i);
+    expect(() => calculateHealthResult({ ...invalidCombination, goal: "gain_muscle" })).toThrow(
+      /positive|finite/i,
+    );
+  });
+
   it("does_not_reject_goal_direction_mismatch", () => {
     expect(() =>
       validateHealthInput({

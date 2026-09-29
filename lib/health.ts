@@ -37,6 +37,8 @@ export type HealthResult = {
   targetDate: Date;
 };
 
+export const healthAlgorithmVersion = "v1";
+
 const activityMultipliers: Record<ActivityLevel, number> = {
   sedentary: 1.2,
   light: 1.375,
@@ -52,10 +54,16 @@ export function calculateHealthResult(input: HealthInput): HealthResult {
   const bmi = roundToOne(validInput.weightKg / (validInput.heightCm / 100) ** 2);
   const bmr = calculateBmr(validInput);
   const tdee = bmr * activityMultipliers[validInput.activityLevel];
+  if (!Number.isFinite(bmr) || bmr <= 0 || !Number.isFinite(tdee) || tdee <= 0) {
+    throw new Error("calculated BMR and TDEE must be positive finite numbers");
+  }
   // 热量建议只由服务端计算，避免前端篡改后直接影响结果页。
   const recommendedCalories = Math.round(
     applyGoalCalorieAdjustment(tdee, validInput.goal, validInput.pacePreference ?? "standard"),
   );
+  if (!Number.isFinite(recommendedCalories) || recommendedCalories <= 0) {
+    throw new Error("recommended calories must be a positive finite number");
+  }
   const targetDate = calculateTargetDate(validInput);
 
   return {
