@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Brandoo110/vitalpath/actions/workflows/ci.yml/badge.svg)](https://github.com/Brandoo110/vitalpath/actions/workflows/ci.yml)
 
-VitalPath 是一个匿名健康测评 funnel 后端：分步保存与恢复、服务端健康计算、结果版本一致性、模拟订阅和免费/会员字段权限。仓库为独立 Git 项目，当前只完成本地代码与验证，尚未部署。
+VitalPath 是一个匿名健康测评 funnel：分步保存与恢复、服务端 `wellness-v2` 健康计算、结果版本一致性、模拟订阅和免费/会员字段权限。仓库为独立 Git 项目，当前只完成本地代码与验证，尚未部署。
 
 - GitHub：<https://github.com/Brandoo110/vitalpath>
 - 线上 URL：待部署；不存在可引用的线上 session。
@@ -22,9 +22,10 @@ npm run build
 npm run test:migration
 npm run test:http
 npm run test:http:failure-cleanup
+npm run test:browser
 ```
 
-开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`test:browser` 用单 worker Chromium/本机已有 Chrome 跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试和 stale 恢复，并只删除本次 session。不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -38,7 +39,7 @@ erDiagram
   Assessment ||--o| Result : sources
 ```
 
-`Assessment.version` 是保存和提交的并发门禁；`Result.assessmentId` 与 `sourceAssessmentVersion` 绑定产生它的测评快照。`Subscription.status` 是订阅唯一来源，API 为兼容性仍返回 `subscriptionStatus`。旧结果的来源版本未知时保留 `NULL`，结果接口要求重新提交。
+`Assessment.version` 是保存和提交的并发门禁；`Assessment.wellnessEligible` 只有用户明确确认适用性时才为 `true`，历史数据保持 `NULL`。`Result.assessmentId` 与 `sourceAssessmentVersion` 绑定产生它的测评快照，`algorithmVersion` 升级后旧结果失效；`targetDate` 和 `calculationDetails` 可空以保留未投影和历史结果。`Subscription.status` 是订阅唯一来源，API 为兼容性仍返回 `subscriptionStatus`。
 
 固定问卷元数据由历史 migration seed，扩展题当前全部可选；`active`、`required` 和 `valueType` 是固定定义的一致性校验字段，其中 `required` 不驱动动态提交校验，提交只校验固定核心健康字段。`valueType` 约束唯一答案列（text/number/boolean/single_choice/multi_choice）；本次 schema migration 会校验已有答案恰好一个值，并保留旧题目和历史答案，不在运行时静默重写 seed。
 
@@ -71,11 +72,11 @@ erDiagram
 
 ### `POST /api/assessment/submit`
 
-请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion` 和来源版本。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。
+请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，不创建或覆盖结果。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
 
 ### `GET /api/results?sessionId=…`
 
-响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改后旧结果返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或完整 `plan`。会员响应由 `Subscription.status=active` 授权。
+响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改或算法版本过期时返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或 `calculationDetails`。会员响应由 `Subscription.status=active` 授权，并返回可空 `targetDate` 和完整 `calculationDetails`。
 
 ### `POST /api/pay`
 
@@ -95,7 +96,7 @@ curl -X POST "$BASE_URL/api/pay" \
 
 ## 测试覆盖
 
-Vitest 使用本地 PostgreSQL；最终候选运行 `npm test -- --maxWorkers=1` 通过 9 个文件、62 个测试。测试重点覆盖算法边界和非有限结果、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证合法旧数据保留（用户、测评、答案、结果数值、订阅及未知来源版本）以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 只在本次 Next 子进程输出 Ready 后发请求，并覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 还验证异常退出后的本次进程组、端口和 session 清理，以及端口占用时不向 dummy 服务发业务请求。
+Vitest 使用本地 PostgreSQL；最终候选运行 `npm test -- --maxWorkers=1` 通过 10 个文件、61 个测试。测试重点覆盖 Mifflin/支持域、BMI 原始边界、目标方向、适用性确认、热量门槛、365 天投影、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证最新迁移保留旧用户/测评/答案/结果/订阅、历史 `wellnessEligible=NULL` 与 v1 来源语义、v2 可空结果列，以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 只在本次 Next 子进程输出 Ready 后发请求，并覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 还验证异常退出后的本次进程组、端口和 session 清理，以及端口占用时不向 dummy 服务发业务请求。`npm run test:browser` 是一 worker 真浏览器回归，不用 mock handler 代替 UI 证据。
 
 未覆盖真实登录、真实支付 webhook、生产数据库迁移、压力/长稳、线上部署和临床有效性；这些超出本次模拟挑战授权与范围。
 

@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:migration": "node scripts/verify-migration.mjs",
     "test:http": "node scripts/http-smoke.mjs",
-    "test:http:failure-cleanup": "node scripts/http-smoke-failure.mjs"
+    "test:http:failure-cleanup": "node scripts/http-smoke-failure.mjs",
+    "test:browser": "node scripts/browser-smoke.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
@@ -22,6 +23,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

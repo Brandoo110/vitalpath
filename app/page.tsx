@@ -44,6 +44,7 @@ type FormState = {
   stressLevel: StressLevel | "";
   mainBarrier: MainBarrier | "";
   healthDataConsent: boolean;
+  wellnessEligible: boolean;
 };
 
 type LeadState = {
@@ -68,6 +69,7 @@ type AssessmentPayload = Partial<{
   stressLevel: StressLevel;
   mainBarrier: MainBarrier;
   healthDataConsent: boolean;
+  wellnessEligible: boolean;
 }>;
 
 type AssessmentResponse = {
@@ -105,7 +107,16 @@ type ResultsResponse = {
     bmiCategory: string;
     recommendedCaloriesRange?: string;
     recommendedCalories?: number;
-    targetDate?: string;
+    targetDate?: string | null;
+    calculationDetails?: {
+      projectionStatus: "projected" | "not_projected" | "maintenance";
+      method: string;
+      policyVersion: string;
+      REE: number;
+      TDEE: number;
+      actualEnergyDifference: number;
+      assumptions: Record<string, unknown>;
+    };
     planPreview?: PlanPreview[];
     plan?: {
       summary: {
@@ -156,6 +167,7 @@ const initialForm: FormState = {
   stressLevel: "",
   mainBarrier: "",
   healthDataConsent: false,
+  wellnessEligible: false,
 };
 
 const initialLead: LeadState = {
@@ -232,7 +244,7 @@ const questionSteps: QuestionStep[] = [
     eyebrow: "Final fit",
     title: "What usually gets in the way?",
     description: "We use this to make the daily actions feel less generic.",
-    fields: ["mainBarrier", "healthDataConsent"],
+    fields: ["mainBarrier", "healthDataConsent", "wellnessEligible"],
   },
 ];
 
@@ -268,6 +280,7 @@ export default function Home() {
   const [generating, setGenerating] = useState(false);
   const [offerOpen, setOfferOpen] = useState(false);
   const [offerApplied, setOfferApplied] = useState(false);
+  const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan>("monthly");
   const [exitOfferSeen, setExitOfferSeen] = useState(false);
   const [sessionWasRestored, setSessionWasRestored] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(9 * 60 + 42);
@@ -366,6 +379,7 @@ export default function Home() {
       clearRetentionOfferSessionId();
       setSessionId(nextSessionId);
       setOfferApplied(false);
+      setSelectedPlan("monthly");
       // 第一次进入时虽然会写 localStorage，但不把它当成“可重新开始”的旧会话。
       setSessionWasRestored(false);
       const restoredCompleted = await restoreAssessment(nextSessionId, false, false);
@@ -454,7 +468,11 @@ export default function Home() {
     } catch (caught) {
       setError(messageFrom(caught));
       setStatus("Save failed");
-      if (messageFrom(caught).toLowerCase().includes("version") && sessionId) {
+      if (
+        caught instanceof ApiClientError &&
+        ["version_conflict", "assessment_stale", "assessment_not_submitted"].includes(caught.code ?? "") &&
+        sessionId
+      ) {
         await restoreAssessment(sessionId);
       }
     } finally {
@@ -530,7 +548,7 @@ export default function Home() {
     }
   }
 
-  async function unlockPlan(plan: SubscriptionPlan = offerApplied ? "quarterly" : "monthly") {
+  async function unlockPlan(plan: SubscriptionPlan = selectedPlan) {
     if (!sessionId || busy || !results?.needPaywall) return;
 
     try {
@@ -544,7 +562,13 @@ export default function Home() {
         body: JSON.stringify({ sessionId, plan }),
       });
       await readBody(response);
-      await loadResults(sessionId, true);
+      try {
+        await loadResults(sessionId, true);
+      } catch (caught) {
+        setError(`Payment succeeded, but the report could not be loaded. Retry reading it. ${messageFrom(caught)}`);
+        setStatus("Report load failed");
+        return;
+      }
       setOfferOpen(false);
       window.sessionStorage.removeItem(exitOfferStorageKey);
       setStatus("Full plan unlocked");
@@ -571,6 +595,7 @@ export default function Home() {
     setLead(initialLead);
     setActiveStep(0);
     setOfferApplied(false);
+    setSelectedPlan("monthly");
     setSessionWasRestored(false);
     window.sessionStorage.removeItem(exitOfferStorageKey);
     setView("bootstrapping");
@@ -744,9 +769,9 @@ export default function Home() {
     const currentWeight = Number(form.weightKg);
     const targetWeight = Number(form.targetWeightKg);
     const targetDate = results.result.targetDate;
-    const hasProjection = Number.isFinite(currentWeight) && Number.isFinite(targetWeight);
+    const hasProjection = Number.isFinite(currentWeight) && Number.isFinite(targetWeight) && currentWeight !== targetWeight;
     const locked = results.needPaywall;
-    const planWeeks = projectionWeeks(currentWeight, targetWeight);
+    const planWeeks = locked || !targetDate ? null : projectionWeeks(currentWeight, targetWeight);
 
     return (
       <main className="page-frame results-frame">
@@ -762,7 +787,7 @@ export default function Home() {
               </span>
             )}
             {locked ? (
-              <button className="topbar-cta" type="button" disabled={busy} onClick={() => unlockPlan()}>
+              <button className="topbar-cta" type="button" disabled={busy} onClick={() => unlockPlan(selectedPlan)}>
                 Get my plan
               </button>
             ) : (
@@ -824,7 +849,7 @@ export default function Home() {
               <strong className={locked ? "locked-value" : ""}>
                 {locked ? "Mmm 00" : targetDate ? shortDate(targetDate) : "On track"}
               </strong>
-              <small>{locked ? "exact date hidden" : "at 0.75 kg / week"}</small>
+              <small>{locked ? "exact date hidden" : targetDate ? "scenario estimate" : "no date projected"}</small>
               {locked ? (
                 <span className="lock-tag">
                   <LockIcon /> Locked
@@ -833,7 +858,7 @@ export default function Home() {
             </div>
           </div>
 
-          <PlanSections results={results} onUnlock={() => unlockPlan()} busy={busy} />
+          <PlanSections results={results} onUnlock={() => unlockPlan(selectedPlan)} busy={busy} />
 
           <MilestoneTimeline weeks={planWeeks} targetDate={targetDate} locked={locked} />
 
@@ -844,6 +869,8 @@ export default function Home() {
               busy={busy}
               countdownSeconds={countdownSeconds}
               offerApplied={offerApplied}
+              selectedPlan={selectedPlan}
+              onSelectPlan={setSelectedPlan}
               onUnlock={unlockPlan}
             />
           ) : (
@@ -872,6 +899,7 @@ export default function Home() {
             onClaim={() => {
               if (sessionId) persistRetentionOfferSessionId(sessionId);
               setOfferApplied(true);
+              setSelectedPlan("quarterly");
               setOfferOpen(false);
             }}
           />
@@ -955,8 +983,8 @@ function StepFields({
         label="Age"
         value={form.age}
         suffix="years"
-        min={13}
-        max={120}
+        min={20}
+        max={78}
         onChange={(value) => updateField("age", value)}
       />
     );
@@ -969,8 +997,8 @@ function StepFields({
           label="Height"
           value={form.heightCm}
           suffix="cm"
-          min={50}
-          max={300}
+          min={130}
+          max={220}
           onChange={(value) => updateField("heightCm", value)}
         />
         <NumberField
@@ -1133,6 +1161,17 @@ function StepFields({
         <span>
           <strong>I agree to use my health data.</strong>
           <small>Required so the server can calculate and store your personalized plan.</small>
+        </span>
+      </label>
+      <label className={`consent-card ${form.wellnessEligible ? "selected" : ""}`}>
+        <input
+          type="checkbox"
+          checked={form.wellnessEligible}
+          onChange={(event) => updateField("wellnessEligible", event.target.checked)}
+        />
+        <span>
+          <strong>I confirm this estimate applies to me.</strong>
+          <small>I am not pregnant or breastfeeding and do not need medical supervision for this diet plan.</small>
         </span>
       </label>
     </div>
@@ -1632,7 +1671,7 @@ function MilestoneTimeline({
   locked,
 }: {
   weeks: number | null;
-  targetDate?: string;
+  targetDate?: string | null;
   locked: boolean;
 }) {
   const goalLabel = locked
@@ -1794,14 +1833,17 @@ function PaywallCard({
   busy,
   countdownSeconds,
   offerApplied,
+  selectedPlan,
+  onSelectPlan,
   onUnlock,
 }: {
   busy: boolean;
   countdownSeconds: number;
   offerApplied: boolean;
+  selectedPlan: SubscriptionPlan;
+  onSelectPlan: (plan: SubscriptionPlan) => void;
   onUnlock: (plan: SubscriptionPlan) => void;
 }) {
-  const [selected, setSelected] = useState("4weeks");
   const offerKind: OfferKind = offerApplied ? "retention" : "initial";
   const offer = getOfferConfig(offerKind);
   const priceTiers = buildPriceTiers(offerKind);
@@ -1821,10 +1863,10 @@ function PaywallCard({
       <div className="price-tiers">
         {priceTiers.map((tier) => (
           <button
-            className={`price-tier ${selected === tier.id ? "selected" : ""}`}
+            className={`price-tier ${planForTier(tier.id) === selectedPlan ? "selected" : ""}`}
             key={tier.id}
             type="button"
-            onClick={() => setSelected(tier.id)}
+            onClick={() => onSelectPlan(planForTier(tier.id))}
           >
             {tier.popular ? <span className="tier-flag">Most popular</span> : null}
             <span className="tier-label">{tier.label}</span>
@@ -1843,7 +1885,7 @@ function PaywallCard({
         className="coral-button"
         type="button"
         disabled={busy}
-        onClick={() => onUnlock(planForTier(selected))}
+        onClick={() => onUnlock(selectedPlan)}
       >
         {offer.cta}
       </button>
@@ -2105,18 +2147,22 @@ function planSubhead(
   hasProjection: boolean,
   currentWeight: number,
   targetWeight: number,
-  targetDate: string | undefined,
+  targetDate: string | null | undefined,
   locked: boolean,
 ) {
   if (!hasProjection) {
-    return "Built from your answers — your goal, body metrics, routine and recovery all shaped this plan.";
+    return locked
+      ? "Built from your answers — unlock the full report to see the supported projection outcome."
+      : "This equal-weight goal is treated as maintenance; keep reviewing the plan as your routine changes.";
   }
   const direction = targetWeight < currentWeight ? "reach" : "build toward";
   const goal = `${direction} ${formatKg(targetWeight)} kg`;
   if (!locked && targetDate) {
-    return `On a sustainable 0.75 kg/week pace, you're on track to ${goal} by ${shortDate(targetDate)}.`;
+    return `Under the simplified energy-balance scenario, you're on track to ${goal} by ${shortDate(targetDate)}.`;
   }
-  return `On a sustainable 0.75 kg/week pace, here's your path to ${goal} — unlock to see your exact goal date.`;
+  return locked
+    ? `A simplified scenario has been calculated for ${goal} — unlock to see the full outcome.`
+    : `The simplified scenario did not reach ${goal} within one year; review the target and reassess regularly.`;
 }
 
 function summaryLine(summary: {
@@ -2159,6 +2205,7 @@ function payloadForStep(step: number, form: FormState): AssessmentPayload {
   return {
     mainBarrier: form.mainBarrier as MainBarrier,
     healthDataConsent: form.healthDataConsent,
+    wellnessEligible: form.wellnessEligible,
   };
 }
 
@@ -2171,17 +2218,28 @@ function validateStep(step: number, form: FormState) {
       if (!form.healthDataConsent) errors.push("Please accept health data use before generating.");
       continue;
     }
+    if (field === "wellnessEligible") {
+      if (!form.wellnessEligible) errors.push("Confirm the estimate eligibility before generating.");
+      continue;
+    }
 
     if (form[field] === "") {
       errors.push(`Complete ${fieldLabel(field)} before continuing.`);
     }
   }
 
-  if (step === 1) range(errors, "Age", form.age, 13, 120, true);
+  if (step === 1) range(errors, "Age", form.age, 20, 78, true);
   if (step === 2) {
-    range(errors, "Height", form.heightCm, 50, 300);
+    range(errors, "Height", form.heightCm, 130, 220);
     range(errors, "Current weight", form.weightKg, 20, 500);
     range(errors, "Target weight", form.targetWeightKg, 20, 500);
+    if (form.heightCm && form.weightKg && form.targetWeightKg) {
+      const heightM = Number(form.heightCm) / 100;
+      const currentBmi = Number(form.weightKg) / heightM ** 2;
+      const targetBmi = Number(form.targetWeightKg) / heightM ** 2;
+      if (currentBmi < 18.5 || currentBmi >= 40) errors.push("Current BMI must be 18.5 to below 40 for this estimate.");
+      if (targetBmi < 18.5 || targetBmi >= 40) errors.push("Target BMI must be 18.5 to below 40 for this estimate.");
+    }
   }
   if (step === 6) {
     range(errors, "Workout days", form.workoutDaysPerWeek, 1, 7, true);
@@ -2228,6 +2286,7 @@ function formFromAssessment(response: AssessmentResponse): FormState {
     stressLevel: assessment.stressLevel ?? "",
     mainBarrier: assessment.mainBarrier ?? "",
     healthDataConsent: response.healthDataConsent,
+    wellnessEligible: assessment.wellnessEligible ?? false,
   };
 }
 

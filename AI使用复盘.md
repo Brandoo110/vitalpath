@@ -16,11 +16,11 @@ AI 先生成正常、异常和边界 payload；Codex 在实现和测试审查过
 
 ## 健康算法与复杂逻辑
 
-健康算法保持题目已有 Mifflin-St Jeor、BMI、TDEE、目标日期和计划生成规则，只增加结果有限性/正值门禁。PATCH 与 submit 都锁定同一 assessment 行；submit 在事务快照内计算并 CAS 式检查 version；结果只允许在 `completed` 且来源版本相等时读取。支付以用户锁串行化首次激活，active 同套餐/省略套餐幂等，不同套餐返回 `plan_conflict`。
+AI 辅助把研究资料翻译为可审计的 `wellness-v2` 合同：保留 Mifflin-St Jeor 和产品活动系数，收窄成人/BMI 支持域，加入显式 `wellnessEligible`、目标方向和热量门槛，并用每天重算 REE/TDEE 的 `simplified_energy_balance_v1` 做最多 365 天情景投影。AI 方案曾倾向把固定减重速度包装成目标日期，我否决了它；不达目标时必须返回 `targetDate=null`，不能夹紧到一年。这个简化模型不是 Hall 动态模型，也没有把无明确许可证的公开重写当作验证。PATCH 与 submit 都锁定同一 assessment 行；submit 在事务快照内计算并 CAS 式检查 version；结果只允许在 `completed`、来源版本和算法版本相等时读取。支付以用户锁串行化首次激活，active 同套餐/省略套餐幂等，不同套餐返回 `plan_conflict`。
 
 ## AI 生成的测试边界
 
-测试重点围绕用户可观察的完整链路，而不是只追求覆盖率：保存→恢复→提交→结果→支付、修改后失效、同版本重复 submit 稳定、同 version 并发 PATCH 一胜一冲突、免费字段不泄露、DB CHECK 和真实 HTTP smoke。当前验证为本地迁移、Vitest、lint、build 和本地 production HTTP；没有把本地结果扩写成线上部署、真实支付或临床结论。
+测试重点围绕用户可观察的完整链路，而不是只追求覆盖率：算法黄金值/边界、保存→恢复→提交→结果→支付、修改后失效、同版本重复 submit 稳定、同 version 并发 PATCH 一胜一冲突、免费字段不泄露、DB CHECK、真实 HTTP smoke 和单 worker 真浏览器回归。浏览器脚本额外验证所有入口共用已选套餐、支付成功后报告读取失败可重试、刷新恢复和 stale 后保留匿名 session。当前验证为本地迁移、Vitest、lint、build、production HTTP 和真浏览器；没有把本地结果扩写成线上部署、真实支付或临床结论。
 
 ## 一次否决 AI 方案
 
