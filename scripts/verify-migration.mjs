@@ -9,10 +9,12 @@ import pg from "pg";
 const { Client } = pg;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationRoot = path.join(root, "prisma", "migrations");
-const newMigrationPath = path.join(migrationRoot, "20260930090000_backend_consistency", "migration.sql");
-const newMigration = await fs.readFile(newMigrationPath, "utf8");
+const consistencyMigrationPath = path.join(migrationRoot, "20260930090000_backend_consistency", "migration.sql");
+const wellnessMigrationPath = path.join(migrationRoot, "20260930103000_wellness_v2", "migration.sql");
+const consistencyMigration = await fs.readFile(consistencyMigrationPath, "utf8");
+const wellnessMigration = await fs.readFile(wellnessMigrationPath, "utf8");
 const oldMigrations = (await fs.readdir(migrationRoot, { withFileTypes: true }))
-  .filter((entry) => entry.isDirectory() && entry.name !== "20260930090000_backend_consistency")
+  .filter((entry) => entry.isDirectory() && !["20260930090000_backend_consistency", "20260930103000_wellness_v2"].includes(entry.name))
   .map((entry) => entry.name)
   .sort();
 
@@ -72,9 +74,10 @@ async function verifyRetained(database) {
       INSERT INTO "assessment_answers" ("id", "assessmentId", "questionId", "valueText") VALUES ('00000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-000000000001-assessment', 'question_pace_preference', 'standard');
       INSERT INTO "results" ("id", "userId", "bmi", "bmiCategory", "recommendedCalories", "targetDate") VALUES ('00000000-0000-4000-8000-000000000003', '00000000-0000-4000-8000-000000000001', 26.4, 'overweight', 1467, CURRENT_TIMESTAMP);
     `);
-    await client.query(newMigration);
+    await client.query(consistencyMigration);
+    await client.query(wellnessMigration);
     const retained = await client.query(`
-      SELECT u."id", a."age", a."version", aa."valueText", r."assessmentId", r."sourceAssessmentVersion", r."recommendedCalories", s."status", s."plan",
+      SELECT u."id", a."age", a."version", a."wellnessEligible", aa."valueText", r."assessmentId", r."sourceAssessmentVersion", r."recommendedCalories", r."targetDate", r."calculationDetails", r."algorithmVersion", s."status", s."plan",
              (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'subscriptionStatus') AS "oldStatusColumn"
       FROM "users" u
       JOIN "assessments" a ON a."userId" = u."id"
@@ -84,8 +87,13 @@ async function verifyRetained(database) {
       WHERE u."id" = '00000000-0000-4000-8000-000000000001'
     `);
     const row = retained.rows[0];
-    if (!row || row.age !== 32 || row.version !== 3 || row.valueText !== "standard" || !row.assessmentId || row.sourceAssessmentVersion !== null || row.recommendedCalories !== 1467 || row.status !== "free" || row.plan !== null || row.oldStatusColumn !== null) {
-      throw new Error("legal historical data was not retained with unknown result source version");
+    if (!row || row.age !== 32 || row.version !== 3 || row.wellnessEligible !== null || row.valueText !== "standard" || !row.assessmentId || row.sourceAssessmentVersion !== null || row.recommendedCalories !== 1467 || row.targetDate === null || row.calculationDetails !== null || row.algorithmVersion !== "v1" || row.status !== "free" || row.plan !== null || row.oldStatusColumn !== null) {
+      throw new Error("legal historical data was not retained with unknown v2 eligibility and calculation semantics");
+    }
+    await client.query(`UPDATE "results" SET "targetDate" = NULL, "calculationDetails" = '{"projectionStatus":"maintenance"}' WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
+    const nullable = await client.query(`SELECT "targetDate", "calculationDetails" FROM "results" WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
+    if (nullable.rows[0].targetDate !== null || nullable.rows[0].calculationDetails?.projectionStatus !== "maintenance") {
+      throw new Error("wellness v2 nullable result columns were not accepted");
     }
   });
 }
@@ -94,7 +102,7 @@ async function verifyFailure(database, setup, expectedText) {
   await applyOldMigrations(database);
   await withDatabase(database, async (client) => {
     await setup(client);
-    await expectFailure(client.query(newMigration), expectedText);
+    await expectFailure(client.query(consistencyMigration), expectedText);
     await client.query("ROLLBACK");
     const rolledBack = await client.query(`
       SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'subscriptionStatus') AS "oldStatus",

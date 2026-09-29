@@ -49,6 +49,20 @@ export async function POST(request: Request) {
       if (missingFields.length > 0) {
         return { kind: "incomplete" as const, missingFields };
       }
+      if (assessment.wellnessEligible !== true) {
+        throw unprocessable(
+          "assessment_invalid",
+          "Confirm that this estimate is appropriate before submitting",
+          { field: "wellnessEligible" },
+        );
+      }
+
+      let extendedAnswers: ExtendedAssessmentAnswers;
+      try {
+        extendedAnswers = mapAnswerRows(assessment.answers);
+      } catch (error) {
+        throw unprocessable("assessment_invalid", errorMessage(error));
+      }
 
       if (
         assessment.completed &&
@@ -62,7 +76,6 @@ export async function POST(request: Request) {
       let calculatedResult: ReturnType<typeof calculateHealthResult>;
       const calculatedAt = new Date();
       try {
-        const extendedAnswers = mapAnswerRows(assessment.answers);
         const resultInput = toHealthInput(assessment, extendedAnswers, calculatedAt);
         calculatedResult = calculateHealthResult(resultInput);
       } catch (error) {
@@ -79,6 +92,7 @@ export async function POST(request: Request) {
           bmiCategory: calculatedResult.bmiCategory,
           recommendedCalories: calculatedResult.recommendedCalories,
           targetDate: calculatedResult.targetDate,
+          calculationDetails: calculatedResult.calculationDetails,
           calculatedAt,
           algorithmVersion: healthAlgorithmVersion,
         },
@@ -89,6 +103,7 @@ export async function POST(request: Request) {
           bmiCategory: calculatedResult.bmiCategory,
           recommendedCalories: calculatedResult.recommendedCalories,
           targetDate: calculatedResult.targetDate,
+          calculationDetails: calculatedResult.calculationDetails,
           calculatedAt,
           algorithmVersion: healthAlgorithmVersion,
         },
@@ -138,6 +153,7 @@ function toHealthInput(
     targetWeightKg: assessment.targetWeightKg as number,
     activityLevel: assessment.activityLevel as HealthInput["activityLevel"],
     pacePreference: extendedAnswers.pacePreference,
+    wellnessEligible: assessment.wellnessEligible ?? undefined,
     now,
   };
 }

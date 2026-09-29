@@ -76,7 +76,7 @@ try {
       heightCm: 165, weightKg: 72, targetWeightKg: 62, activityLevel: "light",
       pacePreference: "standard", workoutDaysPerWeek: 4, sessionMinutes: 30,
       workoutLocation: "home", dietPreference: "high_protein", sleepHours: 6.5,
-      stressLevel: "medium", mainBarrier: "no_time",
+      stressLevel: "medium", mainBarrier: "no_time", wellnessEligible: true,
     },
   }));
   const restored = await request(`/api/assessment?sessionId=${sessionId}`);
@@ -90,7 +90,7 @@ try {
   }
   await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
   const paid = await request(`/api/results?sessionId=${sessionId}`);
-  if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.targetDate || !paid.result.plan) {
+  if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.plan || !paid.result.calculationDetails) {
     throw new Error("paid results did not expose the complete report");
   }
   console.log("HTTP smoke passed", { sessionId, version: second.version });

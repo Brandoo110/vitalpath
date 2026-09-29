@@ -34,6 +34,7 @@ export const assessmentDataSchema = z
     stressLevel: z.enum(stressLevels).optional(),
     mainBarrier: z.enum(mainBarriers).optional(),
     healthDataConsent: z.boolean().optional(),
+    wellnessEligible: z.boolean().optional(),
   })
   .strict();
 

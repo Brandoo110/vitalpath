@@ -44,6 +44,7 @@ type FormState = {
   stressLevel: StressLevel | "";
   mainBarrier: MainBarrier | "";
   healthDataConsent: boolean;
+  wellnessEligible: boolean;
 };
 
 type LeadState = {
@@ -68,6 +69,7 @@ type AssessmentPayload = Partial<{
   stressLevel: StressLevel;
   mainBarrier: MainBarrier;
   healthDataConsent: boolean;
+  wellnessEligible: boolean;
 }>;
 
 type AssessmentResponse = {
@@ -105,7 +107,16 @@ type ResultsResponse = {
     bmiCategory: string;
     recommendedCaloriesRange?: string;
     recommendedCalories?: number;
-    targetDate?: string;
+    targetDate?: string | null;
+    calculationDetails?: {
+      projectionStatus: "projected" | "not_projected" | "maintenance";
+      method: string;
+      policyVersion: string;
+      REE: number;
+      TDEE: number;
+      actualEnergyDifference: number;
+      assumptions: Record<string, unknown>;
+    };
     planPreview?: PlanPreview[];
     plan?: {
       summary: {
@@ -119,6 +130,8 @@ type ResultsResponse = {
     };
   };
 };
+
+type ProjectionStatus = "projected" | "not_projected" | "maintenance";
 
 type QuestionStep = {
   id: string;
@@ -156,6 +169,7 @@ const initialForm: FormState = {
   stressLevel: "",
   mainBarrier: "",
   healthDataConsent: false,
+  wellnessEligible: false,
 };
 
 const initialLead: LeadState = {
@@ -232,7 +246,7 @@ const questionSteps: QuestionStep[] = [
     eyebrow: "Final fit",
     title: "What usually gets in the way?",
     description: "We use this to make the daily actions feel less generic.",
-    fields: ["mainBarrier", "healthDataConsent"],
+    fields: ["mainBarrier", "healthDataConsent", "wellnessEligible"],
   },
 ];
 
@@ -268,8 +282,11 @@ export default function Home() {
   const [generating, setGenerating] = useState(false);
   const [offerOpen, setOfferOpen] = useState(false);
   const [offerApplied, setOfferApplied] = useState(false);
+  const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan>("monthly");
+  const [paymentConfirmed, setPaymentConfirmed] = useState(false);
   const [exitOfferSeen, setExitOfferSeen] = useState(false);
   const [sessionWasRestored, setSessionWasRestored] = useState(false);
+  const [conflictPending, setConflictPending] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(9 * 60 + 42);
 
   const currentStep = questionSteps[activeStep];
@@ -327,38 +344,37 @@ export default function Home() {
   }, [offerApplied, results?.needPaywall, view]);
 
   const updateField = useCallback(<K extends keyof FormState>(field: K, value: FormState[K]) => {
+    if (field === "goal") {
+      const message = goalDirectionMessage(value as Goal, Number(form.weightKg), Number(form.targetWeightKg));
+      if (message) {
+        setError(message);
+        return;
+      }
+      setError(null);
+    }
     setForm((current) => ({ ...current, [field]: value }));
-  }, []);
+  }, [form.targetWeightKg, form.weightKg]);
 
   async function bootstrapSession() {
+    const storedSessionId = window.localStorage.getItem(sessionStorageKey);
     try {
       setBusy(true);
       setError(null);
       setStatus("Preparing your assessment");
 
-      const storedSessionId = window.localStorage.getItem(sessionStorageKey);
       if (storedSessionId) {
-        try {
-          setSessionId(storedSessionId);
-          setOfferApplied(
-            isRetentionOfferApplied({
-              sessionId: storedSessionId,
-              claimedSessionId: readRetentionOfferSessionId(),
-            }),
-          );
-          const restoredCompleted = await restoreAssessment(storedSessionId, false, true);
-          if (!restoredCompleted) setView("landing");
-          setSessionWasRestored(true);
-          setStatus("Ready");
-          return;
-        } catch (caught) {
-          // 数据库被 reset 或 demo 数据被清理后，旧 localStorage 会导致恢复失败。
-          if (!isRecoverableSessionError(caught)) throw caught;
-          window.localStorage.removeItem(sessionStorageKey);
-          clearRetentionOfferSessionId();
-          setOfferApplied(false);
-          setSessionWasRestored(false);
-        }
+        setSessionId(storedSessionId);
+        setOfferApplied(
+          isRetentionOfferApplied({
+            sessionId: storedSessionId,
+            claimedSessionId: readRetentionOfferSessionId(),
+          }),
+        );
+        const restoredCompleted = await restoreAssessment(storedSessionId, false, true);
+        if (!restoredCompleted) setView("landing");
+        setSessionWasRestored(true);
+        setStatus("Ready");
+        return;
       }
 
       const nextSessionId = await createSession();
@@ -366,14 +382,17 @@ export default function Home() {
       clearRetentionOfferSessionId();
       setSessionId(nextSessionId);
       setOfferApplied(false);
+      setSelectedPlan("monthly");
+      setPaymentConfirmed(false);
+      setConflictPending(false);
       // 第一次进入时虽然会写 localStorage，但不把它当成“可重新开始”的旧会话。
       setSessionWasRestored(false);
       const restoredCompleted = await restoreAssessment(nextSessionId, false, false);
       if (!restoredCompleted) setView("landing");
       setStatus("Ready");
     } catch (caught) {
-      setSessionId(null);
-      setSessionWasRestored(false);
+      setSessionId(storedSessionId);
+      setSessionWasRestored(Boolean(storedSessionId));
       setError(messageFrom(caught));
       setStatus("Setup failed");
     } finally {
@@ -396,6 +415,7 @@ export default function Home() {
     nextSessionId: string,
     switchView = true,
     restoreCompletedView = switchView,
+    loadCompletedResult = restoreCompletedView,
   ) {
     const response = await fetch(`/api/assessment?sessionId=${encodeURIComponent(nextSessionId)}`);
     const body = await readBody<AssessmentResponse>(response);
@@ -404,8 +424,20 @@ export default function Home() {
     setServerStep(body.step);
     setForm(formFromAssessment(body));
 
-    if (body.completed) {
-      await loadResults(nextSessionId, restoreCompletedView);
+    if (body.completed && loadCompletedResult) {
+      try {
+        await loadResults(nextSessionId, restoreCompletedView);
+      } catch (caught) {
+        if (isResultRecoveryError(caught)) {
+          setResults(null);
+          await restoreAssessment(nextSessionId, false, false, false);
+          setError("This report is out of date. Review the saved answers and generate it again.");
+          setStatus("Report needs review");
+          setView("funnel");
+          return true;
+        }
+        throw caught;
+      }
       return true;
     }
 
@@ -441,6 +473,7 @@ export default function Home() {
 
       setVersion(body.version);
       setServerStep(body.step);
+      setConflictPending(false);
 
       if (activeStep < questionSteps.length - 1) {
         setActiveStep((step) => step + 1);
@@ -454,8 +487,9 @@ export default function Home() {
     } catch (caught) {
       setError(messageFrom(caught));
       setStatus("Save failed");
-      if (messageFrom(caught).toLowerCase().includes("version") && sessionId) {
-        await restoreAssessment(sessionId);
+      if (caught instanceof ApiClientError && caught.code === "version_conflict") {
+        setConflictPending(true);
+        setError("Your saved answers changed elsewhere. Your current draft is preserved.");
       }
     } finally {
       setBusy(false);
@@ -530,8 +564,26 @@ export default function Home() {
     }
   }
 
-  async function unlockPlan(plan: SubscriptionPlan = offerApplied ? "quarterly" : "monthly") {
+  async function recoverFromResultConflict(nextSessionId: string) {
+    setResults(null);
+    try {
+      await restoreAssessment(nextSessionId, false, false, false);
+      setError("This report is out of date. Review the saved answers and generate it again.");
+      setStatus("Report needs review");
+      setView("funnel");
+    } catch (caught) {
+      setError(`We could not refresh your saved answers. Retry without losing this session. ${messageFrom(caught)}`);
+      setStatus("Refresh failed");
+    }
+  }
+
+  async function unlockPlan(plan: SubscriptionPlan = selectedPlan) {
     if (!sessionId || busy || !results?.needPaywall) return;
+
+    if (paymentConfirmed) {
+      await retryReport();
+      return;
+    }
 
     try {
       setBusy(true);
@@ -544,13 +596,60 @@ export default function Home() {
         body: JSON.stringify({ sessionId, plan }),
       });
       await readBody(response);
-      await loadResults(sessionId, true);
+      setPaymentConfirmed(true);
+      try {
+        await loadResults(sessionId, true);
+      } catch (caught) {
+        if (isResultRecoveryError(caught)) {
+          await recoverFromResultConflict(sessionId);
+          return;
+        }
+        setError(`Payment succeeded, but the report could not be loaded. Retry reading it. ${messageFrom(caught)}`);
+        setStatus("Report load failed");
+        return;
+      }
       setOfferOpen(false);
       window.sessionStorage.removeItem(exitOfferStorageKey);
       setStatus("Full plan unlocked");
     } catch (caught) {
       setError(messageFrom(caught));
       setStatus("Payment failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryReport() {
+    if (!sessionId || busy) return;
+    try {
+      setBusy(true);
+      setError(null);
+      setStatus("Reloading report");
+      await loadResults(sessionId, true);
+      setStatus("Full plan unlocked");
+    } catch (caught) {
+      if (isResultRecoveryError(caught)) {
+        await recoverFromResultConflict(sessionId);
+      } else {
+        setError(`The report could not be loaded. Retry again without paying again. ${messageFrom(caught)}`);
+        setStatus("Report load failed");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadSavedAnswers() {
+    if (!sessionId || busy) return;
+    try {
+      setBusy(true);
+      setError(null);
+      await restoreAssessment(sessionId, false, false, false);
+      setConflictPending(false);
+      setStatus("Saved answers loaded");
+    } catch (caught) {
+      setError(`Saved answers could not be loaded. Your draft is still here. ${messageFrom(caught)}`);
+      setStatus("Refresh failed");
     } finally {
       setBusy(false);
     }
@@ -571,13 +670,22 @@ export default function Home() {
     setLead(initialLead);
     setActiveStep(0);
     setOfferApplied(false);
+    setSelectedPlan("monthly");
+    setPaymentConfirmed(false);
+    setConflictPending(false);
     setSessionWasRestored(false);
     window.sessionStorage.removeItem(exitOfferStorageKey);
     setView("bootstrapping");
     void bootstrapSession();
   }
 
-  if (!sessionId && status === "Setup failed") {
+  function retrySetup() {
+    setError(null);
+    setView("bootstrapping");
+    void bootstrapSession();
+  }
+
+  if (status === "Setup failed") {
     return (
       <main className="page-frame">
         <section className="app-card setup-card">
@@ -585,13 +693,17 @@ export default function Home() {
           <p className="eyebrow">Setup failed</p>
           <h1>We could not start your assessment.</h1>
           <p className="support-copy">
-            The saved session may be stale or the API could not create a new one. Retry clears the
-            local session and asks the server for a fresh anonymous ID.
+            We could not load your saved assessment. Retry keeps this anonymous session; start fresh only if you explicitly want a new one.
           </p>
           {error ? <div className="form-error">{error}</div> : null}
-          <button className="primary-button" type="button" disabled={busy} onClick={resetSetup}>
+          <button className="primary-button" type="button" disabled={busy} onClick={retrySetup}>
             Retry setup
           </button>
+          {sessionWasRestored ? (
+            <button className="text-button" type="button" disabled={busy} onClick={resetSetup}>
+              Start fresh as a new user
+            </button>
+          ) : null}
         </section>
       </main>
     );
@@ -625,8 +737,8 @@ export default function Home() {
           <h1>Build a health plan that fits your body and your week.</h1>
           <p className="landing-sub">
             Answer a few quick questions about your goals, body and routine. We calculate your BMI,
-            daily calories and a realistic target date, then build a workout, nutrition and recovery
-            plan around them.
+            daily calorie guidance and a scenario outcome, then build a workout, nutrition and
+            recovery plan around them.
           </p>
           <ul className="landing-points">
             <li>
@@ -635,7 +747,7 @@ export default function Home() {
             </li>
             <li>
               <strong>Science-based</strong>
-              BMI, BMR and TDEE computed on the server, not guessed.
+              Mifflin-St Jeor, BMI and a fixed activity multiplier are applied consistently on the server.
             </li>
             <li>
               <strong>Saved as you go</strong>
@@ -700,7 +812,7 @@ export default function Home() {
           <p className="eyebrow">Report generated</p>
           <h1>Your plan is ready. Where should we save it?</h1>
           <p className="support-copy">
-            Add your name and email after generation so your report can be restored or sent later.
+            Add your name and email to associate contact details with this session.
           </p>
 
           <div className="lead-summary">
@@ -710,19 +822,21 @@ export default function Home() {
           </div>
 
           <div className="field-stack">
-            <TextField
-              label="Name"
-              value={lead.name}
-              placeholder="Full name"
-              onChange={(value) => setLead((current) => ({ ...current, name: value }))}
-            />
-            <TextField
-              label="Email"
-              value={lead.email}
-              placeholder="you@example.com"
-              type="email"
-              onChange={(value) => setLead((current) => ({ ...current, email: value }))}
-            />
+            <fieldset className="form-fieldset" disabled={busy}>
+              <TextField
+                label="Name"
+                value={lead.name}
+                placeholder="Full name"
+                onChange={(value) => setLead((current) => ({ ...current, name: value }))}
+              />
+              <TextField
+                label="Email"
+                value={lead.email}
+                placeholder="you@example.com"
+                type="email"
+                onChange={(value) => setLead((current) => ({ ...current, email: value }))}
+              />
+            </fieldset>
           </div>
 
           {error ? <div className="form-error">{error}</div> : null}
@@ -744,16 +858,16 @@ export default function Home() {
     const currentWeight = Number(form.weightKg);
     const targetWeight = Number(form.targetWeightKg);
     const targetDate = results.result.targetDate;
-    const hasProjection = Number.isFinite(currentWeight) && Number.isFinite(targetWeight);
+    const hasProjection = Number.isFinite(currentWeight) && Number.isFinite(targetWeight) && currentWeight !== targetWeight;
     const locked = results.needPaywall;
-    const planWeeks = projectionWeeks(currentWeight, targetWeight);
+    const projectionStatus = results.result.calculationDetails?.projectionStatus;
 
     return (
       <main className="page-frame results-frame">
         <header className="result-topbar">
           <p className="wordmark">Better Health Plan</p>
           <div className="result-topbar-right">
-            {locked ? (
+            {locked && !paymentConfirmed ? (
               <DiscountTimer seconds={countdownSeconds} />
             ) : (
               <span className="unlock-pill">
@@ -761,9 +875,13 @@ export default function Home() {
                 Plan unlocked
               </span>
             )}
-            {locked ? (
-              <button className="topbar-cta" type="button" disabled={busy} onClick={() => unlockPlan()}>
+            {locked && !paymentConfirmed ? (
+              <button className="topbar-cta" type="button" disabled={busy} onClick={() => unlockPlan(selectedPlan)}>
                 Get my plan
+              </button>
+            ) : paymentConfirmed && results.needPaywall ? (
+              <button className="topbar-cta" type="button" disabled={busy} onClick={retryReport}>
+                Retry report
               </button>
             ) : (
               <button className="text-button" type="button" onClick={() => setView("funnel")}>
@@ -776,9 +894,9 @@ export default function Home() {
         <section className="results-card" aria-label="Generated plan">
           <div className="result-hero">
             <p className="eyebrow">Your personalized plan</p>
-            <h1>{planHeadline(hasProjection, planWeeks, locked)}</h1>
+            <h1>{planHeadline(locked)}</h1>
             <p className="support-copy">
-              {planSubhead(hasProjection, currentWeight, targetWeight, targetDate, locked)}
+              {planSubhead(hasProjection, currentWeight, targetWeight, targetDate, projectionStatus, locked)}
             </p>
           </div>
 
@@ -822,9 +940,9 @@ export default function Home() {
                 <span>Goal date</span>
               </div>
               <strong className={locked ? "locked-value" : ""}>
-                {locked ? "Mmm 00" : targetDate ? shortDate(targetDate) : "On track"}
+                {locked ? "Mmm 00" : targetDate ? shortDate(targetDate) : projectionStatus === "maintenance" ? "Maintenance" : "No date estimated"}
               </strong>
-              <small>{locked ? "exact date hidden" : "at 0.75 kg / week"}</small>
+              <small>{locked ? "scenario outcome hidden" : targetDate ? "scenario estimate" : projectionStatus === "maintenance" ? "equal-weight scenario" : "outside one-year scenario"}</small>
               {locked ? (
                 <span className="lock-tag">
                   <LockIcon /> Locked
@@ -833,19 +951,29 @@ export default function Home() {
             </div>
           </div>
 
-          <PlanSections results={results} onUnlock={() => unlockPlan()} busy={busy} />
+          <PlanSections results={results} onUnlock={() => unlockPlan(selectedPlan)} busy={busy} />
 
-          <MilestoneTimeline weeks={planWeeks} targetDate={targetDate} locked={locked} />
+          <MilestoneTimeline targetDate={targetDate} projectionStatus={projectionStatus} />
 
-          <SocialProof />
+          <MethodNote />
 
-          {locked ? (
+          {locked && !paymentConfirmed ? (
             <PaywallCard
               busy={busy}
               countdownSeconds={countdownSeconds}
               offerApplied={offerApplied}
+              selectedPlan={selectedPlan}
+              onSelectPlan={setSelectedPlan}
               onUnlock={unlockPlan}
             />
+          ) : paymentConfirmed && results.needPaywall ? (
+            <section className="paywall-card" aria-label="Report retry">
+              <p className="eyebrow">Payment confirmed</p>
+              <h2>Your plan is paid. Reload the report to continue.</h2>
+              <button className="coral-button" type="button" disabled={busy} onClick={retryReport}>
+                Retry report
+              </button>
+            </section>
           ) : (
             <UnlockedCard results={results} />
           )}
@@ -858,7 +986,7 @@ export default function Home() {
             <button className="text-button" type="button" onClick={() => setView("funnel")}>
               Back to answers
             </button>
-            {locked ? (
+            {locked && !paymentConfirmed ? (
               <button className="text-button accent" type="button" onClick={() => setOfferOpen(true)}>
                 I&apos;m not ready yet
               </button>
@@ -872,6 +1000,7 @@ export default function Home() {
             onClaim={() => {
               if (sessionId) persistRetentionOfferSessionId(sessionId);
               setOfferApplied(true);
+              setSelectedPlan("quarterly");
               setOfferOpen(false);
             }}
           />
@@ -904,8 +1033,18 @@ export default function Home() {
           <p>{currentStep.description}</p>
         </div>
 
-        <StepFields step={activeStep} form={form} updateField={updateField} />
+        <fieldset className="form-fieldset" disabled={busy}>
+          <StepFields step={activeStep} form={form} updateField={updateField} />
+        </fieldset>
 
+        {conflictPending ? (
+          <div className="form-error" role="alert">
+            Another save changed this session. Your draft is still visible; loading saved answers will replace it.
+            <button className="text-button" type="button" disabled={busy} onClick={loadSavedAnswers}>
+              Load saved answers and replace this draft
+            </button>
+          </div>
+        ) : null}
         {error ? <div className="form-error">{error}</div> : null}
         {currentErrors.length > 0 ? <div className="form-hint">{currentErrors[0]}</div> : null}
 
@@ -955,8 +1094,8 @@ function StepFields({
         label="Age"
         value={form.age}
         suffix="years"
-        min={13}
-        max={120}
+        min={20}
+        max={78}
         onChange={(value) => updateField("age", value)}
       />
     );
@@ -969,8 +1108,8 @@ function StepFields({
           label="Height"
           value={form.heightCm}
           suffix="cm"
-          min={50}
-          max={300}
+          min={130}
+          max={220}
           onChange={(value) => updateField("heightCm", value)}
         />
         <NumberField
@@ -1133,6 +1272,17 @@ function StepFields({
         <span>
           <strong>I agree to use my health data.</strong>
           <small>Required so the server can calculate and store your personalized plan.</small>
+        </span>
+      </label>
+      <label className={`consent-card ${form.wellnessEligible ? "selected" : ""}`}>
+        <input
+          type="checkbox"
+          checked={form.wellnessEligible}
+          onChange={(event) => updateField("wellnessEligible", event.target.checked)}
+        />
+        <span>
+          <strong>I confirm this estimate applies to me.</strong>
+          <small>I am not pregnant or breastfeeding and do not need medical supervision for this diet plan.</small>
         </span>
       </label>
     </div>
@@ -1627,38 +1777,29 @@ function previewDetailLine(sectionId: string) {
 }
 
 function MilestoneTimeline({
-  weeks,
   targetDate,
-  locked,
+  projectionStatus,
 }: {
-  weeks: number | null;
-  targetDate?: string;
-  locked: boolean;
+  targetDate?: string | null;
+  projectionStatus?: "projected" | "not_projected" | "maintenance";
 }) {
-  const goalLabel = locked
-    ? weeks
-      ? `Week ${weeks}`
-      : "Goal week"
-    : targetDate
-      ? shortDate(targetDate)
-      : weeks
-        ? `Week ${weeks}`
-        : "Goal";
   const milestones = [
     {
-      tag: "Week 1–2",
-      title: "Build the habit",
-      body: "Lock in your daily actions and ease into the training rhythm. Early wins keep you going.",
+      tag: "Start",
+      title: "Build a repeatable routine",
+      body: "Use the saved routine as a starting point and adjust it to your schedule and energy.",
     },
     {
-      tag: "Week 4",
-      title: "Visible momentum",
-      body: "Energy and strength climb as the plan adapts. Most people notice the first real change here.",
+      tag: "Regular review",
+      title: "Review your response",
+      body: "Track weight, energy and soreness over time; this estimate assumes intake and activity stay broadly stable.",
     },
     {
-      tag: goalLabel,
-      title: "Reach your goal",
-      body: "Steady, sustainable progress lands you at your target without crash dieting.",
+      tag: targetDate ? shortDate(targetDate) : projectionStatus === "maintenance" ? "Maintenance" : "No date estimated",
+      title: "Choose the next adjustment",
+      body: targetDate
+        ? "The date is a simplified scenario estimate, so reassess it when your real-world trend changes."
+        : "The model does not promise a target date here; review the target and choose adjustments with appropriate care.",
       gold: true,
     },
   ];
@@ -1682,86 +1823,31 @@ function MilestoneTimeline({
   );
 }
 
-const socialTestimonials = [
-  {
-    quote:
-      "I'd tried everything. The day-by-day plan finally made it click — down 6 kg and it never felt like a diet.",
-    name: "Sarah M.",
-    meta: "Lost 6 kg in 8 weeks",
-  },
-  {
-    quote:
-      "The calorie target and meal ideas took all the guesswork out. I actually look forward to the workouts now.",
-    name: "David L.",
-    meta: "Member since March",
-  },
-];
-
-const pressLogos = ["Healthline", "Women's Health", "Good Housekeeping"];
-
-function SocialProof() {
+function MethodNote() {
   return (
-    <div className="social-proof">
-      <div className="social-stats">
-        <div>
-          <strong>2.2M</strong>
-          <span>plans created</span>
-        </div>
-        <div>
-          <strong>
-            4.6 <StarIcon />
-          </strong>
-          <span>average rating</span>
-        </div>
-        <div>
-          <strong>93%</strong>
-          <span>hit their goal</span>
-        </div>
-      </div>
-
-      <div className="testimonials">
-        {socialTestimonials.map((testimonial) => (
-          <figure className="testimonial" key={testimonial.name}>
-            <div className="testimonial-stars" aria-hidden="true">
-              <StarIcon />
-              <StarIcon />
-              <StarIcon />
-              <StarIcon />
-              <StarIcon />
-            </div>
-            <blockquote>{testimonial.quote}</blockquote>
-            <figcaption>
-              <strong>{testimonial.name}</strong>
-              <span>{testimonial.meta}</span>
-            </figcaption>
-          </figure>
-        ))}
-      </div>
-
-      <div className="press-row">
-        <span className="press-label">As featured in</span>
-        <div className="press-logos">
-          {pressLogos.map((logo) => (
-            <span key={logo}>{logo}</span>
-          ))}
-        </div>
-      </div>
-    </div>
+    <section className="social-proof" aria-label="Estimate method">
+      <h2 className="section-title">How this estimate works</h2>
+      <p>
+        The report keeps Mifflin-St Jeor for resting energy, applies the selected activity multiplier,
+        and uses a fixed-intake simplified energy-balance scenario for the projection. The result is
+        a planning aid, not a clinical prediction; review it as your real-world trend changes.
+      </p>
+    </section>
   );
 }
 
 const faqItems = [
   {
-    q: "Can I cancel anytime?",
-    a: "Yes. You can cancel in one tap from your account — no calls, no forms. You keep access until the end of your billing period.",
+    q: "What happens when I select a plan?",
+    a: "This challenge uses a simulated payment for the current anonymous session. No real charge or payment account is created.",
   },
   {
     q: "Is my plan really personalized?",
     a: "Every plan is built from your answers — your goal, body metrics, activity level, schedule and the barrier you told us about. No two plans are identical.",
   },
   {
-    q: "What if it doesn't work for me?",
-    a: "You're covered by a 30-day money-back guarantee. If you follow the plan and don't see progress, we refund you in full.",
+    q: "How are dates calculated?",
+    a: "A paid report can show a date only when the simplified fixed-intake scenario reaches the target within one year. Equal-weight goals show maintenance, and other cases can have no date estimate.",
   },
   {
     q: "Do I need a gym or equipment?",
@@ -1794,14 +1880,17 @@ function PaywallCard({
   busy,
   countdownSeconds,
   offerApplied,
+  selectedPlan,
+  onSelectPlan,
   onUnlock,
 }: {
   busy: boolean;
   countdownSeconds: number;
   offerApplied: boolean;
+  selectedPlan: SubscriptionPlan;
+  onSelectPlan: (plan: SubscriptionPlan) => void;
   onUnlock: (plan: SubscriptionPlan) => void;
 }) {
-  const [selected, setSelected] = useState("4weeks");
   const offerKind: OfferKind = offerApplied ? "retention" : "initial";
   const offer = getOfferConfig(offerKind);
   const priceTiers = buildPriceTiers(offerKind);
@@ -1812,7 +1901,7 @@ function PaywallCard({
         <p className="eyebrow">Unlock your full plan</p>
         <DiscountTimer seconds={countdownSeconds} inverted />
       </div>
-      <h2>Get your exact calories, goal date and full weekly plan.</h2>
+      <h2>Get exact calories, the projection outcome and the full weekly plan.</h2>
       <p>
         {offer.headline} Everything you previewed above stays available to unlock in full,
         including the day-by-day schedule, meal ideas and recovery guide.
@@ -1821,10 +1910,10 @@ function PaywallCard({
       <div className="price-tiers">
         {priceTiers.map((tier) => (
           <button
-            className={`price-tier ${selected === tier.id ? "selected" : ""}`}
+            className={`price-tier ${planForTier(tier.id) === selectedPlan ? "selected" : ""}`}
             key={tier.id}
             type="button"
-            onClick={() => setSelected(tier.id)}
+            onClick={() => onSelectPlan(planForTier(tier.id))}
           >
             {tier.popular ? <span className="tier-flag">Most popular</span> : null}
             <span className="tier-label">{tier.label}</span>
@@ -1843,25 +1932,13 @@ function PaywallCard({
         className="coral-button"
         type="button"
         disabled={busy}
-        onClick={() => onUnlock(planForTier(selected))}
+        onClick={() => onUnlock(selectedPlan)}
       >
         {offer.cta}
       </button>
 
-      <ul className="paywall-trust">
-        <li>
-          <ShieldIcon /> 30-day money-back guarantee
-        </li>
-        <li>
-          <LockIcon /> SSL-secured checkout
-        </li>
-        <li>
-          <CardIcon /> Cancel anytime
-        </li>
-      </ul>
       <small className="paywall-fineprint">
-        Demo checkout: clicking Get my plan simulates payment and unlocks this session · Trusted by
-        2.2M members · 4.6★ average rating · secured by 256-bit encryption
+        Demo checkout: this button simulates payment for this session. No real charge is made.
       </small>
     </section>
   );
@@ -1893,6 +1970,7 @@ function DiscountTimer({ seconds, inverted = false }: { seconds: number; inverte
 }
 
 function UnlockedCard({ results }: { results: ResultsResponse }) {
+  const projectionStatus = results.result.calculationDetails?.projectionStatus;
   return (
     <section className="unlocked-card">
       <div className="unlocked-head">
@@ -1912,7 +1990,11 @@ function UnlockedCard({ results }: { results: ResultsResponse }) {
         <div>
           <span>Goal date</span>
           <strong>
-            {results.result.targetDate ? shortDate(results.result.targetDate) : "On track"}
+            {results.result.targetDate
+              ? shortDate(results.result.targetDate)
+              : projectionStatus === "maintenance"
+                ? "Maintenance"
+                : "No date estimated"}
           </strong>
         </div>
       </div>
@@ -1927,8 +2009,8 @@ function ExitOfferModal({ onClose, onClaim }: { onClose: () => void; onClaim: ()
         <p className="eyebrow">Before you go</p>
         <h2>Unlock a 50% off exit offer.</h2>
         <p>
-          Your current plan has 30% off. Apply this one-time 50% discount to unlock the exact
-          calories, target date and full plan for less.
+          Your current plan has 30% off. Apply this one-time 50% discount to unlock exact calories,
+          the projection outcome and the full plan for less.
         </p>
         <div className="modal-actions">
           <button className="text-button" type="button" onClick={onClose}>
@@ -2052,32 +2134,6 @@ function ArrowIcon() {
   );
 }
 
-function StarIcon() {
-  return (
-    <svg className="icon star" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M12 3.5l2.6 5.3 5.9.8-4.3 4.1 1 5.8L12 16.9 6.8 19.5l1-5.8L3.5 9.6l5.9-.8z" />
-    </svg>
-  );
-}
-
-function ShieldIcon() {
-  return (
-    <svg {...iconProps()}>
-      <path d="M12 3l7 2.5v5C19 16 16 19.5 12 21c-4-1.5-7-5-7-10.5v-5z" />
-      <path d="M9 12l2 2 4-4" />
-    </svg>
-  );
-}
-
-function CardIcon() {
-  return (
-    <svg {...iconProps()}>
-      <rect x="3" y="6" width="18" height="12" rx="2" />
-      <path d="M3 10h18M7 15h3" />
-    </svg>
-  );
-}
-
 function PlusIcon() {
   return (
     <svg {...iconProps()}>
@@ -2086,18 +2142,7 @@ function PlusIcon() {
   );
 }
 
-function projectionWeeks(currentWeight: number, targetWeight: number): number | null {
-  if (!Number.isFinite(currentWeight) || !Number.isFinite(targetWeight)) return null;
-  const diff = Math.abs(currentWeight - targetWeight);
-  if (diff === 0) return null;
-  return Math.max(1, Math.ceil(diff / 0.75));
-}
-
-function planHeadline(hasProjection: boolean, weeks: number | null, locked: boolean) {
-  if (hasProjection && weeks) {
-    const weekLabel = weeks === 1 ? "1-week" : `${weeks}-week`;
-    return locked ? `Your ${weekLabel} plan is ready.` : `Your ${weekLabel} plan is unlocked.`;
-  }
+function planHeadline(locked: boolean) {
   return locked ? "Your personalized plan is ready." : "Your personalized plan is unlocked.";
 }
 
@@ -2105,18 +2150,28 @@ function planSubhead(
   hasProjection: boolean,
   currentWeight: number,
   targetWeight: number,
-  targetDate: string | undefined,
+  targetDate: string | null | undefined,
+  projectionStatus: ProjectionStatus | undefined,
   locked: boolean,
 ) {
+  if (locked) {
+    return "Built from your answers using a simplified energy-balance scenario. Unlock the full report to see its assumptions and outcome.";
+  }
   if (!hasProjection) {
-    return "Built from your answers — your goal, body metrics, routine and recovery all shaped this plan.";
+    return "This equal-weight goal is treated as maintenance; keep reviewing the plan as your routine changes.";
   }
   const direction = targetWeight < currentWeight ? "reach" : "build toward";
   const goal = `${direction} ${formatKg(targetWeight)} kg`;
-  if (!locked && targetDate) {
-    return `On a sustainable 0.75 kg/week pace, you're on track to ${goal} by ${shortDate(targetDate)}.`;
+  if (projectionStatus === "maintenance") {
+    return "This scenario is treated as maintenance; review the plan as your routine changes.";
   }
-  return `On a sustainable 0.75 kg/week pace, here's your path to ${goal} — unlock to see your exact goal date.`;
+  if (projectionStatus === "not_projected") {
+    return `The simplified scenario did not reach ${goal} within one year; review the target and reassess regularly.`;
+  }
+  if (targetDate) {
+    return `Under the simplified energy-balance scenario, you're on track to ${goal} by ${shortDate(targetDate)}.`;
+  }
+  return `The simplified scenario has no date estimate for ${goal}; review the target and reassess regularly.`;
 }
 
 function summaryLine(summary: {
@@ -2159,6 +2214,7 @@ function payloadForStep(step: number, form: FormState): AssessmentPayload {
   return {
     mainBarrier: form.mainBarrier as MainBarrier,
     healthDataConsent: form.healthDataConsent,
+    wellnessEligible: form.wellnessEligible,
   };
 }
 
@@ -2171,17 +2227,32 @@ function validateStep(step: number, form: FormState) {
       if (!form.healthDataConsent) errors.push("Please accept health data use before generating.");
       continue;
     }
+    if (field === "wellnessEligible") {
+      if (!form.wellnessEligible) errors.push("Confirm the estimate eligibility before generating.");
+      continue;
+    }
 
     if (form[field] === "") {
       errors.push(`Complete ${fieldLabel(field)} before continuing.`);
     }
   }
 
-  if (step === 1) range(errors, "Age", form.age, 13, 120, true);
+  if (step === 1) range(errors, "Age", form.age, 20, 78, true);
   if (step === 2) {
-    range(errors, "Height", form.heightCm, 50, 300);
+    range(errors, "Height", form.heightCm, 130, 220);
     range(errors, "Current weight", form.weightKg, 20, 500);
     range(errors, "Target weight", form.targetWeightKg, 20, 500);
+    if (form.heightCm && form.weightKg && form.targetWeightKg) {
+      const heightM = Number(form.heightCm) / 100;
+      const currentBmi = Number(form.weightKg) / heightM ** 2;
+      const targetBmi = Number(form.targetWeightKg) / heightM ** 2;
+      if (currentBmi < 18.5 || currentBmi >= 40) errors.push("Current BMI must be 18.5 to below 40 for this estimate.");
+      if (targetBmi < 18.5 || targetBmi >= 40) errors.push("Target BMI must be 18.5 to below 40 for this estimate.");
+    }
+  }
+  if (step === 3 && form.goal) {
+    const message = goalDirectionMessage(form.goal, Number(form.weightKg), Number(form.targetWeightKg));
+    if (message) errors.push(message);
   }
   if (step === 6) {
     range(errors, "Workout days", form.workoutDaysPerWeek, 1, 7, true);
@@ -2190,6 +2261,23 @@ function validateStep(step: number, form: FormState) {
   if (step === 8) range(errors, "Sleep hours", form.sleepHours, 0, 16);
 
   return errors;
+}
+
+function goalDirectionMessage(goal: Goal, currentWeight: number, targetWeight: number) {
+  if (!Number.isFinite(currentWeight) || !Number.isFinite(targetWeight)) return null;
+  if (goal === "lose_weight" && targetWeight >= currentWeight) {
+    return "Lose weight needs a target below your current weight. Go back and update the body metrics.";
+  }
+  if (goal === "gain_muscle" && targetWeight <= currentWeight) {
+    return "Gain muscle needs a target above your current weight. Go back and update the body metrics.";
+  }
+  if (goal === "keep_fit" && targetWeight !== currentWeight) {
+    return "Keep fit uses an equal target weight. Go back and set the target to your current weight.";
+  }
+  if (goal === "get_toned" && targetWeight > currentWeight) {
+    return "Get toned supports an equal or lower target weight. Go back and update the body metrics.";
+  }
+  return null;
 }
 
 function validateLead(lead: LeadState) {
@@ -2228,6 +2316,7 @@ function formFromAssessment(response: AssessmentResponse): FormState {
     stressLevel: assessment.stressLevel ?? "",
     mainBarrier: assessment.mainBarrier ?? "",
     healthDataConsent: response.healthDataConsent,
+    wellnessEligible: assessment.wellnessEligible ?? false,
   };
 }
 
@@ -2266,8 +2355,8 @@ function parseJsonBody(text: string) {
   }
 }
 
-function isRecoverableSessionError(error: unknown) {
-  return error instanceof ApiClientError && (error.status === 404 || error.code === "not_found");
+function isResultRecoveryError(error: unknown) {
+  return error instanceof ApiClientError && ["assessment_stale", "assessment_not_submitted"].includes(error.code ?? "");
 }
 
 function toNumber(value: string) {

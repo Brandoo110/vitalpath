@@ -234,6 +234,7 @@ async function saveCompleteAssessment(sessionId: string) {
       stressLevel: "medium",
       mainBarrier: "no_time",
       healthDataConsent: true,
+      wellnessEligible: true,
     },
   }));
   expect(response.status).toBe(200);

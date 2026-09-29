@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PATCH as patchAssessment } from "@/app/api/assessment/route";
+import { GET as getAssessment } from "@/app/api/assessment/route";
 import { POST as submitAssessment } from "@/app/api/assessment/submit/route";
 import { GET as getResults } from "@/app/api/results/route";
 import { POST as pay } from "@/app/api/pay/route";
@@ -82,8 +83,58 @@ describe("submit, results and pay API", () => {
     expect(assessment.completed).toBe(true);
     expect(result.bmi).toBe(26.4);
     expect(result.bmiCategory).toBe("overweight");
-    expect(result.recommendedCalories).toBe(1467);
-    expect(result.targetDate.getTime()).toBeGreaterThan(Date.now());
+    expect(result.recommendedCalories).toBe(1573);
+    expect(result.targetDate?.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("rejects_unsupported_submit_without_writing_a_new_result", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    const firstResponse = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    expect(firstResponse.status).toBe(200);
+    const original = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+
+    const patchResponse = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 6,
+      version: 1,
+      data: { targetWeightKg: 75 },
+    }));
+    expect(patchResponse.status).toBe(200);
+    const rejected = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 2 }),
+    );
+    const body = await rejected.json();
+
+    expect(rejected.status).toBe(422);
+    expect(body.error).toBe("assessment_invalid");
+    const current = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(current.id).toBe(original.id);
+    expect(current.sourceAssessmentVersion).toBe(1);
+    expect(current.recommendedCalories).toBe(original.recommendedCalories);
+    expect((await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } })).completed).toBe(false);
+  });
+
+  it("returns_assessment_invalid_when_wellness_eligibility_is_not_confirmed", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    const patchResponse = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 5,
+      version: 1,
+      data: { wellnessEligible: false },
+    }));
+    expect(patchResponse.status).toBe(200);
+
+    const response = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 2 }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(422);
+    expect(body.error).toBe("assessment_invalid");
+    expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(0);
   });
 
   it("returns_the_same_result_for_repeat_submit_at_the_same_version", async () => {
@@ -105,7 +156,66 @@ describe("submit, results and pay API", () => {
     expect(secondBody.resultId).toBe(firstBody.resultId);
     const secondResult = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
     expect(secondResult.calculatedAt.getTime()).toBe(firstResult.calculatedAt.getTime());
-    expect(secondResult.targetDate.getTime()).toBe(firstResult.targetDate.getTime());
+    expect(secondResult.targetDate?.getTime()).toBe(firstResult.targetDate?.getTime());
+  });
+
+  it.each([
+    ["wrong numeric value column", "sessionMinutes", { valueNumber: null, valueText: "30" }],
+    ["invalid enum value", "pacePreference", { valueText: "unsupported" }],
+  ])("rejects persisted %s on restore, submit and results without overwriting the result", async (_label, key, data) => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const original = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    const answer = await prisma.assessmentAnswer.findFirstOrThrow({
+      where: { assessmentId: assessment.id, question: { key } },
+    });
+
+    await prisma.assessmentAnswer.update({ where: { id: answer.id }, data });
+
+    const restoreResponse = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+    );
+    expect(restoreResponse.status).toBe(422);
+    expect((await restoreResponse.json()).error).toBe("assessment_invalid");
+
+    const resultsResponse = await getResults(
+      new Request(`http://localhost/api/results?sessionId=${sessionId}`),
+    );
+    expect(resultsResponse.status).toBe(422);
+    expect((await resultsResponse.json()).error).toBe("assessment_invalid");
+
+    const submitResponse = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    expect(submitResponse.status).toBe(422);
+    expect((await submitResponse.json()).error).toBe("assessment_invalid");
+
+    const unchanged = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(unchanged.id).toBe(original.id);
+    expect(unchanged.calculatedAt.getTime()).toBe(original.calculatedAt.getTime());
+  });
+
+  it("rejects a persisted answer whose question definition no longer matches", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    const question = await prisma.questionnaireQuestion.findUniqueOrThrow({ where: { key: "sessionMinutes" } });
+
+    await prisma.questionnaireQuestion.update({ where: { id: question.id }, data: { active: false } });
+    try {
+      const response = await getResults(
+        new Request(`http://localhost/api/results?sessionId=${sessionId}`),
+      );
+      expect(response.status).toBe(422);
+      expect((await response.json()).error).toBe("assessment_invalid");
+    } finally {
+      await prisma.questionnaireQuestion.update({ where: { id: question.id }, data: { active: true } });
+    }
+    expect(await prisma.result.findUnique({ where: { userId: sessionId } })).not.toBeNull();
+    expect(assessment.completed).toBe(true);
   });
 
   it("invalidates_a_result_after_a_new_assessment_version", async () => {
@@ -211,7 +321,7 @@ describe("submit, results and pay API", () => {
     expect(body.result).toMatchObject({
       bmi: 26.4,
       bmiCategory: "overweight",
-      recommendedCaloriesRange: "<1500",
+      recommendedCaloriesRange: "1500-1800",
       planPreview: [
         {
           id: "workout",
@@ -237,6 +347,7 @@ describe("submit, results and pay API", () => {
     });
     expect(body.result).not.toHaveProperty("recommendedCalories");
     expect(body.result).not.toHaveProperty("targetDate");
+    expect(body.result).not.toHaveProperty("calculationDetails");
     expect(body.result).not.toHaveProperty("plan");
     expect(body.lockedFields).toEqual(["recommendedCalories", "targetDate"]);
     expect(body.lockedSections).toEqual([
@@ -277,8 +388,9 @@ describe("submit, results and pay API", () => {
     expect(afterPayBody.result).toMatchObject({
       bmi: 26.4,
       bmiCategory: "overweight",
-      recommendedCalories: 1467,
+      recommendedCalories: 1573,
       targetDate: expect.any(String),
+      calculationDetails: expect.objectContaining({ policyVersion: "wellness-v2" }),
       plan: {
         summary: {
           pacePreference: "standard",
@@ -406,6 +518,7 @@ async function saveCompleteAssessment(sessionId: string) {
         stressLevel: "medium",
         mainBarrier: "no_time",
         healthDataConsent: true,
+        wellnessEligible: true,
       },
     }),
   );

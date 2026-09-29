@@ -58,6 +58,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser smoke
+        run: npm run test:browser
+
       - name: HTTP smoke
         run: npm run test:http
 

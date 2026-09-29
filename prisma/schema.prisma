@@ -64,7 +64,7 @@ enum QuestionValueType {
 model User {
   id                 String             @id @default(uuid())
   createdAt          DateTime           @default(now())
-  /// 报告生成后收集的 lead 信息，用于恢复/发送计划；不阻塞前置问卷
+  /// 报告生成后收集的 lead 信息，用于关联当前 session；不阻塞前置问卷
   name               String?
   email              String?
   /// 健康数据使用同意（合规位，借鉴 BetterMe healthDataConsent）
@@ -96,6 +96,8 @@ model Assessment {
   step      Int      @default(0)
   /// 是否已提交完成
   completed Boolean  @default(false)
+  /// 用户明确确认非孕期/哺乳期且无需医疗监督；历史数据保持 null。
+  wellnessEligible Boolean?
   /// 乐观并发版本号（支撑“并发更新”测试）
   version   Int      @default(0)
   createdAt DateTime @default(now())
@@ -162,7 +164,8 @@ model Result {
   bmiCategory         BmiCategory
   recommendedCalories Int
   /// 预测达成目标的日期（非会员脱敏时隐藏）
-  targetDate          DateTime
+  targetDate          DateTime?
+  calculationDetails  Json?
   calculatedAt         DateTime @default(now())
   algorithmVersion     String   @default("v1")
   createdAt           DateTime @default(now())

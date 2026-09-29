@@ -7,6 +7,7 @@ import type {
   StressLevel,
   WorkoutLocation,
 } from "./health";
+import { assessmentDataSchema } from "./validation";
 
 export const extendedQuestionDefinitions = [
   {
@@ -132,11 +133,35 @@ export function mapAnswerRows(rows: AnswerWithQuestion[]): ExtendedAssessmentAns
 
   for (const row of rows) {
     const key = row.question.key;
-    if (!isExtendedQuestionKey(key)) continue;
+    const definition = extendedQuestionDefinitions.find((candidate) => candidate.key === key);
+    if (!definition || !isExtendedQuestionKey(key)) {
+      throw new Error(`Assessment answer uses an unknown question: ${key}`);
+    }
+    if (
+      row.question.required !== definition.required ||
+      row.question.active !== definition.active ||
+      row.question.valueType !== definition.valueType
+    ) {
+      throw new Error(`Question definition is inactive or has an incompatible type for ${key}`);
+    }
 
-    const value = numericQuestionKeySet.has(key) ? row.valueNumber : row.valueText;
-    if (value === null || value === undefined) continue;
+    const columns = [
+      ["valueText", row.valueText],
+      ["valueNumber", row.valueNumber],
+      ["valueBoolean", row.valueBoolean],
+      ["valueJson", row.valueJson],
+    ].filter(([, value]) => value !== null && value !== undefined);
+    if (columns.length !== 1) {
+      throw new Error(`Assessment answer must contain exactly one value for ${key}`);
+    }
 
+    const [column, rawValue] = columns[0];
+    const expectedColumn = numericQuestionKeySet.has(key) ? "valueNumber" : "valueText";
+    if (column !== expectedColumn) {
+      throw new Error(`Assessment answer uses ${column} for ${key}; expected ${expectedColumn}`);
+    }
+
+    const value = validateAnswerValue(key, rawValue);
     assignAnswerValue(answers, key, value);
   }
 
@@ -193,6 +218,7 @@ export async function upsertAssessmentAnswers(
 }
 
 function answerValueData(key: ExtendedQuestionKey, value: unknown) {
+  const normalizedValue = validateAnswerValue(key, value);
   const empty = {
     valueText: null,
     valueNumber: null,
@@ -201,10 +227,22 @@ function answerValueData(key: ExtendedQuestionKey, value: unknown) {
   };
 
   if (numericQuestionKeySet.has(key)) {
-    return { ...empty, valueNumber: value as number };
+    return { ...empty, valueNumber: normalizedValue as number };
   }
 
-  return { ...empty, valueText: value as string };
+  return { ...empty, valueText: normalizedValue as string };
+}
+
+function validateAnswerValue(key: ExtendedQuestionKey, value: unknown): string | number {
+  const parsed = assessmentDataSchema.safeParse({ [key]: value });
+  if (!parsed.success) {
+    throw new Error(`Assessment answer is invalid for ${key}: ${parsed.error.message}`);
+  }
+  const normalized = (parsed.data as Record<string, unknown>)[key];
+  if (typeof normalized !== "string" && typeof normalized !== "number") {
+    throw new Error(`Assessment answer has an invalid value for ${key}`);
+  }
+  return normalized;
 }
 
 function assignAnswerValue(

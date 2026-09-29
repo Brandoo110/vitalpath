@@ -1,8 +1,9 @@
 import { Prisma } from "@/app/generated/prisma/client";
 import { handleRouteError, jsonResponse } from "@/lib/api";
 import { mapAnswerRows } from "@/lib/assessment-answers";
-import { notFound } from "@/lib/errors";
+import { notFound, unprocessable } from "@/lib/errors";
 import { buildPlan, buildPlanPreview } from "@/lib/plan";
+import { healthAlgorithmVersion } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
 import { sessionRequestSchema } from "@/lib/validation";
 
@@ -61,7 +62,8 @@ export async function GET(request: Request) {
       !user.assessment.completed ||
       user.result.assessmentId !== user.assessment.id ||
       user.result.sourceAssessmentVersion === null ||
-      user.result.sourceAssessmentVersion !== user.assessment.version
+      user.result.sourceAssessmentVersion !== user.assessment.version ||
+      user.result.algorithmVersion !== healthAlgorithmVersion
     ) {
       return jsonResponse(
         {
@@ -73,7 +75,12 @@ export async function GET(request: Request) {
       );
     }
 
-    const extendedAnswers = user.assessment ? mapAnswerRows(user.assessment.answers) : {};
+    let extendedAnswers = {};
+    try {
+      extendedAnswers = user.assessment ? mapAnswerRows(user.assessment.answers) : {};
+    } catch (error) {
+      throw unprocessable("assessment_invalid", errorMessage(error));
+    }
     const plan = buildPlan({
       goal: user.assessment?.goal,
       activityLevel: user.assessment?.activityLevel,
@@ -92,7 +99,8 @@ export async function GET(request: Request) {
           bmi: user.result.bmi,
           bmiCategory: user.result.bmiCategory,
           recommendedCalories: user.result.recommendedCalories,
-          targetDate: user.result.targetDate.toISOString(),
+          targetDate: user.result.targetDate?.toISOString() ?? null,
+          calculationDetails: user.result.calculationDetails,
           plan,
         },
       }, { headers: noStoreHeaders });
@@ -116,6 +124,10 @@ export async function GET(request: Request) {
     response.headers.set("Cache-Control", "private, no-store");
     return response;
   }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Assessment data is invalid";
 }
 
 function calorieRange(recommendedCalories: number) {
