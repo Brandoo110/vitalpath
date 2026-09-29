@@ -161,7 +161,16 @@ async function stopServer() {
 }
 
 async function settled(promise, milliseconds) {
-  return Promise.race([promise, timeout(milliseconds, "process exit timeout").then(() => null)]);
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), milliseconds);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function freePort() {
