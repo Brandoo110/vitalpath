@@ -3,6 +3,7 @@ import { handleRouteError, jsonResponse } from "@/lib/api";
 import { mapAnswerRows } from "@/lib/assessment-answers";
 import { notFound } from "@/lib/errors";
 import { buildPlan, buildPlanPreview } from "@/lib/plan";
+import { healthAlgorithmVersion } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
 import { sessionRequestSchema } from "@/lib/validation";
 
@@ -61,7 +62,8 @@ export async function GET(request: Request) {
       !user.assessment.completed ||
       user.result.assessmentId !== user.assessment.id ||
       user.result.sourceAssessmentVersion === null ||
-      user.result.sourceAssessmentVersion !== user.assessment.version
+      user.result.sourceAssessmentVersion !== user.assessment.version ||
+      user.result.algorithmVersion !== healthAlgorithmVersion
     ) {
       return jsonResponse(
         {
@@ -92,7 +94,8 @@ export async function GET(request: Request) {
           bmi: user.result.bmi,
           bmiCategory: user.result.bmiCategory,
           recommendedCalories: user.result.recommendedCalories,
-          targetDate: user.result.targetDate.toISOString(),
+          targetDate: user.result.targetDate?.toISOString() ?? null,
+          calculationDetails: user.result.calculationDetails,
           plan,
         },
       }, { headers: noStoreHeaders });

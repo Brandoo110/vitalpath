@@ -54,6 +54,7 @@ export async function GET(request: Request) {
         weightKg: assessment.weightKg,
         targetWeightKg: assessment.targetWeightKg,
         activityLevel: assessment.activityLevel,
+        wellnessEligible: assessment.wellnessEligible,
         ...extendedAnswers,
       },
       step: assessment.step,

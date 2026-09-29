@@ -49,6 +49,13 @@ export async function POST(request: Request) {
       if (missingFields.length > 0) {
         return { kind: "incomplete" as const, missingFields };
       }
+      if (assessment.wellnessEligible !== true) {
+        throw unprocessable(
+          "assessment_invalid",
+          "Confirm that this estimate is appropriate before submitting",
+          { field: "wellnessEligible" },
+        );
+      }
 
       if (
         assessment.completed &&
@@ -79,6 +86,7 @@ export async function POST(request: Request) {
           bmiCategory: calculatedResult.bmiCategory,
           recommendedCalories: calculatedResult.recommendedCalories,
           targetDate: calculatedResult.targetDate,
+          calculationDetails: calculatedResult.calculationDetails,
           calculatedAt,
           algorithmVersion: healthAlgorithmVersion,
         },
@@ -89,6 +97,7 @@ export async function POST(request: Request) {
           bmiCategory: calculatedResult.bmiCategory,
           recommendedCalories: calculatedResult.recommendedCalories,
           targetDate: calculatedResult.targetDate,
+          calculationDetails: calculatedResult.calculationDetails,
           calculatedAt,
           algorithmVersion: healthAlgorithmVersion,
         },
@@ -138,6 +147,7 @@ function toHealthInput(
     targetWeightKg: assessment.targetWeightKg as number,
     activityLevel: assessment.activityLevel as HealthInput["activityLevel"],
     pacePreference: extendedAnswers.pacePreference,
+    wellnessEligible: assessment.wellnessEligible ?? undefined,
     now,
   };
 }
