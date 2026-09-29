@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PATCH as patchAssessment } from "@/app/api/assessment/route";
+import { GET as getAssessment } from "@/app/api/assessment/route";
 import { POST as submitAssessment } from "@/app/api/assessment/submit/route";
 import { GET as getResults } from "@/app/api/results/route";
 import { POST as pay } from "@/app/api/pay/route";
@@ -156,6 +157,65 @@ describe("submit, results and pay API", () => {
     const secondResult = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
     expect(secondResult.calculatedAt.getTime()).toBe(firstResult.calculatedAt.getTime());
     expect(secondResult.targetDate?.getTime()).toBe(firstResult.targetDate?.getTime());
+  });
+
+  it.each([
+    ["wrong numeric value column", "sessionMinutes", { valueNumber: null, valueText: "30" }],
+    ["invalid enum value", "pacePreference", { valueText: "unsupported" }],
+  ])("rejects persisted %s on restore, submit and results without overwriting the result", async (_label, key, data) => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const original = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    const answer = await prisma.assessmentAnswer.findFirstOrThrow({
+      where: { assessmentId: assessment.id, question: { key } },
+    });
+
+    await prisma.assessmentAnswer.update({ where: { id: answer.id }, data });
+
+    const restoreResponse = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+    );
+    expect(restoreResponse.status).toBe(422);
+    expect((await restoreResponse.json()).error).toBe("assessment_invalid");
+
+    const resultsResponse = await getResults(
+      new Request(`http://localhost/api/results?sessionId=${sessionId}`),
+    );
+    expect(resultsResponse.status).toBe(422);
+    expect((await resultsResponse.json()).error).toBe("assessment_invalid");
+
+    const submitResponse = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    expect(submitResponse.status).toBe(422);
+    expect((await submitResponse.json()).error).toBe("assessment_invalid");
+
+    const unchanged = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(unchanged.id).toBe(original.id);
+    expect(unchanged.calculatedAt.getTime()).toBe(original.calculatedAt.getTime());
+  });
+
+  it("rejects a persisted answer whose question definition no longer matches", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    const question = await prisma.questionnaireQuestion.findUniqueOrThrow({ where: { key: "sessionMinutes" } });
+
+    await prisma.questionnaireQuestion.update({ where: { id: question.id }, data: { active: false } });
+    try {
+      const response = await getResults(
+        new Request(`http://localhost/api/results?sessionId=${sessionId}`),
+      );
+      expect(response.status).toBe(422);
+      expect((await response.json()).error).toBe("assessment_invalid");
+    } finally {
+      await prisma.questionnaireQuestion.update({ where: { id: question.id }, data: { active: true } });
+    }
+    expect(await prisma.result.findUnique({ where: { userId: sessionId } })).not.toBeNull();
+    expect(assessment.completed).toBe(true);
   });
 
   it("invalidates_a_result_after_a_new_assessment_version", async () => {

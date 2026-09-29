@@ -120,6 +120,9 @@ export function validateHealthInput(input: HealthInput): HealthInput {
   if (input.pacePreference !== undefined && !pacePreferences.includes(input.pacePreference)) {
     throw new Error("pacePreference is invalid");
   }
+  if (input.now !== undefined && (!(input.now instanceof Date) || !Number.isFinite(input.now.getTime()))) {
+    throw new Error("now must be a valid date");
+  }
 
   assertFiniteNumberInRange("age", input.age, supportedAge.min, supportedAge.max, true);
   assertFiniteNumberInRange("heightCm", input.heightCm, supportedHeight.min, supportedHeight.max);
@@ -150,7 +153,10 @@ function calculateRecommendedCalories(tdee: number, input: HealthInput) {
 
   const pace = input.pacePreference ?? "standard";
   let intake = tdee;
-  if (input.goal === "lose_weight" || input.goal === "get_toned") {
+  if (
+    input.goal === "lose_weight" ||
+    (input.goal === "get_toned" && input.targetWeightKg < input.weightKg)
+  ) {
     const cap = pace === "gentle" ? 250 : 500;
     intake = Math.max(threshold, tdee - Math.min(cap, tdee * (pace === "gentle" ? 0.15 : 0.2)));
   } else if (input.goal === "gain_muscle") {

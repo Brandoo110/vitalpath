@@ -76,6 +76,18 @@ describe("wellness-v2 health algorithm", () => {
     expect(result.recommendedCalories).toBe(1967);
   });
 
+  it("treats equal-weight toning as maintenance", () => {
+    const result = calculateHealthResult({ ...baseInput, goal: "get_toned", targetWeightKg: 72 });
+
+    expect(result.recommendedCalories).toBe(1967);
+    expect(result.targetDate).toBeNull();
+    expect(result.calculationDetails.projectionStatus).toBe("maintenance");
+  });
+
+  it("rejects an invalid projection timestamp", () => {
+    expect(() => calculateHealthResult({ ...baseInput, now: new Date("invalid") })).toThrow(/now|date/i);
+  });
+
   it("returns not_projected when the one-year scenario cannot reach target", () => {
     const result = calculateHealthResult({
       ...baseInput,

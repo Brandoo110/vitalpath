@@ -2,7 +2,7 @@ import { Prisma } from "@/app/generated/prisma/client";
 import { jsonResponse, handleRouteError, readJson } from "@/lib/api";
 import { mapAnswerRows, splitAssessmentData, upsertAssessmentAnswers } from "@/lib/assessment-answers";
 import { lockAssessment, lockUser } from "@/lib/assessment-service";
-import { conflict, notFound } from "@/lib/errors";
+import { conflict, notFound, unprocessable } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import { patchAssessmentSchema, sessionRequestSchema } from "@/lib/validation";
 
@@ -42,7 +42,12 @@ export async function GET(request: Request) {
     }
 
     const { assessment } = user;
-    const extendedAnswers = mapAnswerRows(assessment.answers);
+    let extendedAnswers;
+    try {
+      extendedAnswers = mapAnswerRows(assessment.answers);
+    } catch (error) {
+      throw unprocessable("assessment_invalid", errorMessage(error));
+    }
     return jsonResponse({
       sessionId,
       healthDataConsent: user.healthDataConsent,
@@ -64,6 +69,10 @@ export async function GET(request: Request) {
   } catch (error) {
     return handleRouteError(error);
   }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Assessment data is invalid";
 }
 
 export async function PATCH(request: Request) {

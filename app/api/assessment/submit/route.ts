@@ -57,6 +57,13 @@ export async function POST(request: Request) {
         );
       }
 
+      let extendedAnswers: ExtendedAssessmentAnswers;
+      try {
+        extendedAnswers = mapAnswerRows(assessment.answers);
+      } catch (error) {
+        throw unprocessable("assessment_invalid", errorMessage(error));
+      }
+
       if (
         assessment.completed &&
         user.result?.assessmentId === assessment.id &&
@@ -69,7 +76,6 @@ export async function POST(request: Request) {
       let calculatedResult: ReturnType<typeof calculateHealthResult>;
       const calculatedAt = new Date();
       try {
-        const extendedAnswers = mapAnswerRows(assessment.answers);
         const resultInput = toHealthInput(assessment, extendedAnswers, calculatedAt);
         calculatedResult = calculateHealthResult(resultInput);
       } catch (error) {
