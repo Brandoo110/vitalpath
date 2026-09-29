@@ -833,7 +833,7 @@ export default function Home() {
             </div>
           </div>
 
-          <PlanSections results={results} onUnlock={unlockPlan} busy={busy} />
+          <PlanSections results={results} onUnlock={() => unlockPlan()} busy={busy} />
 
           <MilestoneTimeline weeks={planWeeks} targetDate={targetDate} locked={locked} />
 
