@@ -134,9 +134,9 @@ type Option = {
   mark: string;
 };
 
-const sessionStorageKey = "health-funnel-session-id";
-const exitOfferStorageKey = "health-funnel-show-exit-offer";
-const retentionOfferStorageKey = "health-funnel-retention-offer-session-id";
+const sessionStorageKey = "vitalpath-session-id";
+const exitOfferStorageKey = "vitalpath-show-exit-offer";
+const retentionOfferStorageKey = "vitalpath-retention-offer-session-id";
 
 const initialForm: FormState = {
   gender: "",
@@ -447,7 +447,7 @@ export default function Home() {
         return;
       }
 
-      await submitAndLoadResults(sessionId, false);
+      await submitAndLoadResults(sessionId, false, body.version);
       setStatus("Report generated");
       setView("lead");
     } catch (caught) {
@@ -461,7 +461,7 @@ export default function Home() {
     }
   }
 
-  async function submitAndLoadResults(nextSessionId: string, switchView = true) {
+  async function submitAndLoadResults(nextSessionId: string, switchView = true, nextVersion = version) {
     setGenerating(true);
     try {
       await Promise.all([
@@ -469,7 +469,7 @@ export default function Home() {
           const submitResponse = await fetch("/api/assessment/submit", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ sessionId: nextSessionId }),
+            body: JSON.stringify({ sessionId: nextSessionId, version: nextVersion }),
           });
           await readBody<{ ok: true; resultId: string }>(submitResponse);
           await loadResults(nextSessionId, switchView);
