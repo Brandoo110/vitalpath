@@ -1,0 +1,177 @@
+// Prisma 7 schema —— 健康测评系统
+// datasource.url 在 prisma.config.ts（迁移走 DIRECT_URL）
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- 枚举（用 enum 而非裸字符串，展示专业性 + 防非法值）----------
+
+enum SubscriptionStatus {
+  free
+  active
+}
+
+enum Gender {
+  male
+  female
+}
+
+/// 测评目标（借鉴 BetterMe，可按需扩展）
+enum Goal {
+  lose_weight
+  gain_muscle
+  keep_fit
+  get_toned
+}
+
+/// 运动频率（对应 TDEE 活动系数）
+enum ActivityLevel {
+  sedentary // 久坐 1.2
+  light     // 轻度 1.375
+  moderate  // 中度 1.55
+  high      // 高度 1.725
+}
+
+enum BmiCategory {
+  underweight
+  normal
+  overweight
+  obese
+}
+
+enum QuestionValueType {
+  text
+  number
+  boolean
+  single_choice
+  multi_choice
+}
+
+// ---------- 用户/会话（匿名身份，UUID 识别，不做真实登录）----------
+
+model User {
+  id                 String             @id @default(uuid())
+  createdAt          DateTime           @default(now())
+  /// 报告生成后收集的 lead 信息，用于恢复/发送计划；不阻塞前置问卷
+  name               String?
+  email              String?
+  /// 当前生效的订阅状态，鉴权直接读它（快）；明细见 Subscription 表
+  subscriptionStatus SubscriptionStatus @default(free)
+  /// 健康数据使用同意（合规位，借鉴 BetterMe healthDataConsent）
+  healthDataConsent  Boolean            @default(false)
+
+  assessment   Assessment?
+  result       Result?
+  subscription Subscription?
+
+  @@map("users")
+}
+
+// ---------- 测评数据（分步保存 + 进度恢复）----------
+
+model Assessment {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  gender         Gender?
+  goal           Goal?
+  age            Int?
+  heightCm       Float?
+  weightKg       Float?
+  targetWeightKg Float?
+  activityLevel  ActivityLevel?
+
+  /// 当前进度步（借鉴 BetterMe step，支撑“进度恢复”）
+  step      Int      @default(0)
+  /// 是否已提交完成
+  completed Boolean  @default(false)
+  /// 乐观并发版本号（支撑“并发更新”测试）
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  answers AssessmentAnswer[]
+
+  @@map("assessments")
+}
+
+// ---------- 可扩展问卷题目与答案 ----------
+
+model QuestionnaireQuestion {
+  id        String            @id @default(uuid())
+  /// 稳定业务 key，例如 sessionMinutes；API 用 key 做兼容，不暴露内部题目 id。
+  key       String            @unique
+  label     String
+  section   String
+  valueType QuestionValueType
+  required  Boolean           @default(false)
+  active    Boolean           @default(true)
+  sortOrder Int               @default(0)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  answers AssessmentAnswer[]
+
+  @@map("questionnaire_questions")
+}
+
+model AssessmentAnswer {
+  id           String                @id @default(uuid())
+  assessmentId String
+  assessment   Assessment            @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  questionId   String
+  question     QuestionnaireQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  /// 按题目类型落到受控值列；数组/复杂值才用 valueJson，避免退回“一张 JSON 大表”。
+  valueText    String?
+  valueNumber  Float?
+  valueBoolean Boolean?
+  valueJson    Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([assessmentId, questionId])
+  @@index([questionId])
+  @@map("assessment_answers")
+}
+
+// ---------- 服务端计算结果 ----------
+
+model Result {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  bmi                 Float
+  bmiCategory         BmiCategory
+  recommendedCalories Int
+  /// 预测达成目标的日期（非会员脱敏时隐藏）
+  targetDate          DateTime
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @default(now()) @updatedAt
+
+  @@map("results")
+}
+
+// ---------- 订阅/支付记录 ----------
+
+model Subscription {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status    SubscriptionStatus @default(free)
+  plan      String?
+  /// 模拟支付回调写入
+  paidAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  @@map("subscriptions")
+}
