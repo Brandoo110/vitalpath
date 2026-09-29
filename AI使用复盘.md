@@ -4,7 +4,7 @@
 
 ## 竞品数据流分析
 
-AI 协助把 BetterMe funnel 的观察整理为后端约束：匿名 session、分步恢复、核心健康字段与扩展问卷分离、支付前后字段白名单。竞品的页面和接口只用于设计启发，不作为 VitalPath 的线上证据，也没有照搬真实支付或登录。
+本轮竞品分析继承既有挑战资料和设计笔记中对 BetterMe funnel 的观察；本次没有重新体验竞品页面或接口。AI 将这些既有观察整理为后端约束：匿名 session、分步恢复、核心健康字段与扩展问卷分离、支付前后字段白名单。竞品资料只用于设计启发，不作为 VitalPath 的线上证据，也没有照搬真实支付或登录。
 
 ## DB 建模
 
@@ -12,7 +12,7 @@ AI 协助把 BetterMe funnel 的观察整理为后端约束：匿名 session、�
 
 ## Mock 数据与测试数据
 
-AI 先生成正常、异常和边界 payload，再人工收敛为 Vitest 用例：完整女性减重、男性增肌、扩展问卷、乱序 step、旧 version、非法 UUID/enum、数字字符串注入、`null` 数值、重复支付、不同套餐重放和真实并发 PATCH。数据库测试直接写本地 PostgreSQL，事务回滚测试通过停用题目定义触发真实持久化失败，不 mock 被测事务。
+AI 先生成正常、异常和边界 payload；Codex 在实现和测试审查过程中按当前 schema、验证器和 API 合同筛选并执行 Vitest 用例：完整女性减重、男性增肌、扩展问卷、乱序 step、旧 version、非法 UUID/enum、数字字符串注入、`null` 数值、重复支付、不同套餐重放和真实并发 PATCH。数据库测试直接写本地 PostgreSQL，事务回滚测试通过停用题目定义触发真实持久化失败，不 mock 被测事务。
 
 ## 健康算法与复杂逻辑
 
@@ -26,4 +26,4 @@ AI 先生成正常、异常和边界 payload，再人工收敛为 Vitest 用例�
 
 曾有一个简单方案建议继续保留 `users.subscriptionStatus`，并在支付时同时更新 User 与 Subscription。这个方案会产生双状态漂移：并发支付或部分失败时，结果接口可能读到与订阅明细不同的状态。因此本轮迁移前显式检查旧双状态冲突，然后删除 User 的重复字段，结果和支付只读取/写入 `Subscription.status`，API 仍兼容返回名为 `subscriptionStatus` 的字段。
 
-本次修正否决了 C1 中暴露的锁交接缺陷：旧实现对已有测评先锁 assessment，只有首次保存才锁 user，submit 也没有统一先锁 user，首次创建与提交因此没有一个共同的聚合根门禁。修正为 PATCH/submit 都先锁 user，再读取/锁 assessment；测试用可释放的真实数据库锁屏障控制请求交错，验证首次创建、既有 PATCH/submit 顺序和同版本 submit，而不依赖随机调度。
+本次修正否决了 C1 中暴露的锁交接缺陷：旧实现对已有测评先锁 assessment，只有首次保存才锁 user，submit 也没有统一先锁 user，首次创建与提交因此没有一个共同的聚合根门禁。修正为 PATCH/submit 都先锁 user，再读取/锁 assessment；测试通过 `vi.spyOn` 包装 `lockUser`，先调用真实实现取得 PostgreSQL user 行锁，再在持锁事务内用可释放 gate 控制交错，验证首次创建三请求、既有 PATCH/submit 顺序和同版本 submit，而不依赖随机调度或 production 测试 hook。

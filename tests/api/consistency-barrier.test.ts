@@ -1,15 +1,25 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PATCH as patchAssessment } from "@/app/api/assessment/route";
 import { POST as submitAssessment } from "@/app/api/assessment/submit/route";
 import { POST as createSession } from "@/app/api/sessions/route";
+import * as assessmentService from "@/lib/assessment-service";
 import { prisma } from "@/lib/prisma";
-import { setBeforeUserLockHook } from "@/lib/assessment-service";
 
 const createdSessionIds = new Set<string>();
+const activeBarriers = new Set<LockBarrier>();
+
+const originalLockUser = assessmentService.lockUser;
 
 afterEach(async () => {
-  setBeforeUserLockHook(null);
+  for (const barrier of activeBarriers) barrier.release();
+  await Promise.race([
+    Promise.allSettled([...activeBarriers].flatMap((barrier) => barrier.inflight())),
+    timeout(5_000, "lock barrier cleanup timed out"),
+  ]);
+  for (const barrier of activeBarriers) barrier.restore();
+  activeBarriers.clear();
+
   for (const sessionId of createdSessionIds) {
     await prisma.user.deleteMany({ where: { id: sessionId } });
   }
@@ -17,143 +27,182 @@ afterEach(async () => {
 });
 
 describe("assessment aggregate lock ordering", () => {
-  it("serializes first creation before a competing submit", async () => {
+  it("serializes first creation before submit and a following consent patch", async () => {
     const sessionId = await createSessionId();
-    const barrier = firstUserLockBarrier();
+    const barrier = lockBarrier();
 
-    const patchPromise = patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+    const creator = barrier.track(patchAssessment(jsonRequest("PATCH", "/api/assessment", {
       sessionId,
       step: 1,
       version: 0,
       data: { gender: "female" },
-    }));
-    await barrier.firstEntered;
+    })));
+    await barrier.firstAcquired;
 
-    const submitPromise = submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
+    const waitingSubmit = barrier.track(submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
       sessionId,
       version: 0,
-    }));
-    await barrier.secondEntered;
+    })));
+    await barrier.waiterStarted;
+
+    const followingPatch = barrier.track(patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 2,
+      version: 1,
+      data: { healthDataConsent: true },
+    })));
+    await barrier.thirdStarted;
     barrier.release();
 
-    expect((await patchPromise).status).toBe(200);
-    const submitResponse = await submitPromise;
-    expect(submitResponse.status).toBe(409);
-    expect((await submitResponse.json()).error).toBe("version_conflict");
-  });
-
-  it("lets an existing patch wait behind submit and preserves consent", async () => {
-    const sessionId = await createSessionId();
-    await saveCompleteAssessment(sessionId);
-    const barrier = firstUserLockBarrier();
-
-    const submitPromise = submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
-      sessionId,
-      version: 1,
-    }));
-    await barrier.firstEntered;
-
-    const patchResponse = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
-      sessionId,
-      step: 6,
-      version: 1,
-      data: { healthDataConsent: false },
-    }));
-    expect(patchResponse.status).toBe(200);
-
-    barrier.release();
-    const submitResponse = await submitPromise;
-    expect(submitResponse.status).toBe(409);
-    expect((await submitResponse.json()).error).toBe("version_conflict");
+    expect((await creator).status).toBe(200);
+    expect((await waitingSubmit).status).toBe(409);
+    expect((await followingPatch).status).toBe(200);
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: sessionId },
       include: { assessment: true },
     });
-    expect(user.healthDataConsent).toBe(false);
+    expect(user.healthDataConsent).toBe(true);
     expect(user.assessment?.version).toBe(2);
   });
 
-  it("keeps submit first when patch is the queued waiter", async () => {
+  it("keeps an existing submit first when patch waits for the user lock", async () => {
     const sessionId = await createSessionId();
     await saveCompleteAssessment(sessionId);
-    const barrier = firstUserLockBarrier();
+    const barrier = lockBarrier();
 
-    const patchPromise = patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+    const submit = barrier.track(submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
+      sessionId,
+      version: 1,
+    })));
+    await barrier.firstAcquired;
+    const patch = barrier.track(patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 6,
+      version: 1,
+      data: { healthDataConsent: false },
+    })));
+    await barrier.waiterStarted;
+    barrier.release();
+
+    expect((await submit).status).toBe(200);
+    expect((await patch).status).toBe(200);
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(assessment.version).toBe(2);
+    expect(assessment.completed).toBe(false);
+  });
+
+  it("keeps an existing patch first when submit waits for the user lock", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    const barrier = lockBarrier();
+
+    const patch = barrier.track(patchAssessment(jsonRequest("PATCH", "/api/assessment", {
       sessionId,
       step: 6,
       version: 1,
       data: { weightKg: 70 },
-    }));
-    await barrier.firstEntered;
-
-    const submitPromise = submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
+    })));
+    await barrier.firstAcquired;
+    const submit = barrier.track(submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
       sessionId,
       version: 1,
-    }));
-    await barrier.secondEntered;
-    const submitResponse = await submitPromise;
-    expect(submitResponse.status).toBe(200);
-
+    })));
+    await barrier.waiterStarted;
     barrier.release();
-    expect((await patchPromise).status).toBe(200);
-    const result = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
-    expect(result.sourceAssessmentVersion).toBe(1);
+
+    expect((await patch).status).toBe(200);
+    expect((await submit).status).toBe(409);
+    expect((await submit).json()).resolves.toMatchObject({ error: "version_conflict" });
   });
 
   it("returns one stable result for same-version concurrent submits", async () => {
     const sessionId = await createSessionId();
     await saveCompleteAssessment(sessionId);
-    const barrier = firstUserLockBarrier();
+    const barrier = lockBarrier();
 
-    const firstPromise = submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
+    const firstSubmit = barrier.track(submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
       sessionId,
       version: 1,
-    }));
-    await barrier.firstEntered;
-    const secondPromise = submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
+    })));
+    await barrier.firstAcquired;
+    const secondSubmit = barrier.track(submitAssessment(jsonRequest("POST", "/api/assessment/submit", {
       sessionId,
       version: 1,
-    }));
-    await barrier.secondEntered;
+    })));
+    await barrier.waiterStarted;
     barrier.release();
 
-    const firstResponse = await firstPromise;
-    expect(firstResponse.status).toBe(200);
+    const firstResponse = await firstSubmit;
+    const firstBody = await firstResponse.json();
     const firstResult = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
-    const secondResponse = await secondPromise;
-    expect(secondResponse.status).toBe(200);
-    expect((await firstResponse.json()).resultId).toBe((await secondResponse.json()).resultId);
+    const secondResponse = await secondSubmit;
+    const secondBody = await secondResponse.json();
     const secondResult = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    expect(secondBody.resultId).toBe(firstBody.resultId);
     expect(secondResult.calculatedAt).toEqual(firstResult.calculatedAt);
+    expect(secondResult.targetDate).toEqual(firstResult.targetDate);
   });
 });
 
-function firstUserLockBarrier() {
+type LockBarrier = ReturnType<typeof lockBarrier>;
+
+function lockBarrier() {
   let calls = 0;
-  let release!: () => void;
-  const releaseFirst = new Promise<void>((resolve) => {
-    let released = false;
-    release = () => {
+  let releaseGate!: () => void;
+  let resolveFirstAcquired!: () => void;
+  let resolveWaiterStarted!: () => void;
+  let resolveThirdStarted!: () => void;
+  let released = false;
+  const hold = new Promise<void>((resolve) => {
+    releaseGate = () => {
       if (!released) {
         released = true;
         resolve();
       }
     };
   });
-  let resolveFirst!: () => void;
-  let resolveSecond!: () => void;
-  const entered = new Promise<void>((resolve) => { resolveFirst = resolve; });
-  const secondEntered = new Promise<void>((resolve) => { resolveSecond = resolve; });
-  setBeforeUserLockHook(async () => {
-    calls += 1;
-    if (calls === 1) {
-      resolveFirst();
-      await releaseFirst;
-    } else if (calls === 2) {
-      resolveSecond();
+  const firstAcquired = new Promise<void>((resolve) => { resolveFirstAcquired = resolve; });
+  const waiterStarted = new Promise<void>((resolve) => { resolveWaiterStarted = resolve; });
+  const thirdStarted = new Promise<void>((resolve) => { resolveThirdStarted = resolve; });
+  const inflightRequests = new Set<Promise<unknown>>();
+  const spy = vi.spyOn(assessmentService, "lockUser").mockImplementation(async (tx, userId) => {
+    const call = ++calls;
+    if (call === 2) {
+      resolveWaiterStarted();
+    } else if (call === 3) {
+      resolveThirdStarted();
     }
+    const result = await originalLockUser(tx, userId);
+    if (call === 1) {
+      resolveFirstAcquired();
+      await hold;
+    }
+    return result;
   });
-  return { firstEntered: entered, secondEntered, release };
+
+  const barrier = {
+    firstAcquired,
+    waiterStarted,
+    thirdStarted,
+    track<T>(request: Promise<T>) {
+      inflightRequests.add(request);
+      void request.then(
+        () => inflightRequests.delete(request),
+        () => inflightRequests.delete(request),
+      );
+      return request;
+    },
+    inflight() {
+      return [...inflightRequests];
+    },
+    release: releaseGate,
+    restore: () => spy.mockRestore(),
+  };
+  activeBarriers.add(barrier);
+  return barrier;
 }
 
 async function createSessionId() {
@@ -195,5 +244,12 @@ function jsonRequest(method: string, path: string, body: unknown) {
     method,
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+function timeout(milliseconds: number, message: string) {
+  return new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    timer.unref();
   });
 }

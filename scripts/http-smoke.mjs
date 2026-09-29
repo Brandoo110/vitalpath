@@ -13,6 +13,10 @@ const baseUrl = `http://127.0.0.1:${port}`;
 let sessionId;
 let server;
 let serverExit;
+let serverExitResult;
+let ready;
+let serverOutput = "";
+let serverSpawnError;
 
 try {
   server = spawn(process.execPath, [nextBin, "start", "--hostname", "127.0.0.1", "-p", String(port)], {
@@ -20,15 +24,37 @@ try {
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   });
-  let output = "";
-  server.stdout.on("data", (chunk) => { output += chunk.toString(); });
-  server.stderr.on("data", (chunk) => { output += chunk.toString(); });
+  console.log("HTTP smoke child", JSON.stringify({ pid: server.pid, port }));
+  ready = new Promise((resolve) => {
+    let settled = false;
+    const resolveOnce = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    server.stdout.on("data", (chunk) => {
+      serverOutput += chunk.toString();
+      if (/\bready\b/i.test(serverOutput)) resolveOnce();
+    });
+    server.stderr.on("data", (chunk) => { serverOutput += chunk.toString(); });
+  });
   serverExit = new Promise((resolve) => {
-    server.once("exit", (code, signal) => resolve({ code, signal, output }));
-    server.once("error", (error) => resolve({ error, output }));
+    let settled = false;
+    const resolveOnce = (result) => {
+      if (!settled) {
+        settled = true;
+        serverExitResult = result;
+        resolve(result);
+      }
+    };
+    const completed = (code, signal) => resolveOnce({ code, signal, error: serverSpawnError, output: serverOutput });
+    server.once("exit", completed);
+    server.once("close", completed);
+    server.once("error", (error) => { serverSpawnError = String(error); });
   });
 
-  await waitForServer();
+  await waitForReady();
   const session = await request("/api/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -72,7 +98,13 @@ try {
   try {
     await cleanup();
   } finally {
-    await stopServer();
+    const stopped = await stopServer();
+    console.log("HTTP smoke child stopped", JSON.stringify({
+      pid: server?.pid,
+      port,
+      code: stopped?.code ?? null,
+      signal: stopped?.signal ?? null,
+    }));
   }
 }
 
@@ -80,22 +112,13 @@ function json(method, body) {
   return { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }
 
-async function waitForServer() {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    if (server?.exitCode !== null) {
-      const details = await serverExit;
-      throw new Error(`Next HTTP server exited before readiness: ${JSON.stringify(details)}`);
-    }
-    try {
-      const response = await fetch(`${baseUrl}/`);
-      if (response.ok && server?.exitCode === null) return;
-    } catch {
-      // The Next server is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error("Next HTTP server did not start within 30 seconds");
+async function waitForReady() {
+  const result = await Promise.race([
+    ready,
+    serverExit.then((exit) => { throw new Error(`Next HTTP server exited before Ready: ${JSON.stringify(exit)}`); }),
+    timeout(30_000, "Next HTTP server did not emit Ready within 30 seconds"),
+  ]);
+  return result;
 }
 
 async function request(pathname, options) {
@@ -117,22 +140,28 @@ async function cleanup() {
 }
 
 async function stopServer() {
-  if (!server || server.exitCode !== null) return;
+  if (!server || !serverExit) return null;
+  if (serverExitResult) return serverExitResult;
+  let result;
   try {
     process.kill(-server.pid, "SIGTERM");
   } catch (error) {
     if (error.code !== "ESRCH") throw error;
   }
-  const deadline = Date.now() + 5_000;
-  while (server.exitCode === null && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  result = await settled(serverExit, 5_000);
+  if (result) return result;
+  try {
+    process.kill(-server.pid, "SIGKILL");
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
   }
-  if (server.exitCode === null) {
-    try { process.kill(-server.pid, "SIGKILL"); } catch (error) {
-      if (error.code !== "ESRCH") throw error;
-    }
-  }
-  await serverExit;
+  result = await settled(serverExit, 5_000);
+  if (!result) throw new Error("Next HTTP server did not exit after SIGKILL");
+  return result;
+}
+
+async function settled(promise, milliseconds) {
+  return Promise.race([promise, timeout(milliseconds, "process exit timeout").then(() => null)]);
 }
 
 async function freePort() {
@@ -145,4 +174,11 @@ async function freePort() {
   const selectedPort = typeof address === "object" && address ? address.port : 0;
   await new Promise((resolve) => listener.close(resolve));
   return selectedPort;
+}
+
+function timeout(milliseconds, message) {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    timer.unref();
+  });
 }

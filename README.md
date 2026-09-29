@@ -40,7 +40,7 @@ erDiagram
 
 `Assessment.version` 是保存和提交的并发门禁；`Result.assessmentId` 与 `sourceAssessmentVersion` 绑定产生它的测评快照。`Subscription.status` 是订阅唯一来源，API 为兼容性仍返回 `subscriptionStatus`。旧结果的来源版本未知时保留 `NULL`，结果接口要求重新提交。
 
-固定问卷元数据由历史 migration seed：每个题目以 `active` 控制是否仍可写入、以 `required` 描述提交所需的扩展题、以 `valueType` 约束唯一答案列（text/number/boolean/single_choice/multi_choice）；本次 schema migration 会校验已有答案恰好一个值，并保留旧题目和历史答案，不在运行时静默重写 seed。
+固定问卷元数据由历史 migration seed，扩展题当前全部可选；`active`、`required` 和 `valueType` 是固定定义的一致性校验字段，其中 `required` 不驱动动态提交校验，提交只校验固定核心健康字段。`valueType` 约束唯一答案列（text/number/boolean/single_choice/multi_choice）；本次 schema migration 会校验已有答案恰好一个值，并保留旧题目和历史答案，不在运行时静默重写 seed。
 
 ## API
 
@@ -95,7 +95,7 @@ curl -X POST "$BASE_URL/api/pay" \
 
 ## 测试覆盖
 
-Vitest 使用本地 PostgreSQL；最终候选运行 `npm test -- --maxWorkers=1` 通过 9 个文件、62 个测试。测试重点覆盖算法边界和非有限结果、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证合法旧数据保留（用户、测评、答案、结果数值、订阅及未知来源版本）以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 通过真实 Next HTTP 服务覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 专门验证 smoke 异常退出后的进程和 session 清理。
+Vitest 使用本地 PostgreSQL；最终候选运行 `npm test -- --maxWorkers=1` 通过 9 个文件、62 个测试。测试重点覆盖算法边界和非有限结果、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证合法旧数据保留（用户、测评、答案、结果数值、订阅及未知来源版本）以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 只在本次 Next 子进程输出 Ready 后发请求，并覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 还验证异常退出后的本次进程组、端口和 session 清理，以及端口占用时不向 dummy 服务发业务请求。
 
 未覆盖真实登录、真实支付 webhook、生产数据库迁移、压力/长稳、线上部署和临床有效性；这些超出本次模拟挑战授权与范围。
 
