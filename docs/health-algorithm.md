@@ -15,6 +15,8 @@ The user must explicitly set `wellnessEligible=true`, confirming that they are n
 
 ## Calculation
 
+The source boundary is explicit: [Mifflin et al. (1990)](https://pubmed.ncbi.nlm.nih.gov/2305711/) supports the resting-energy equation used here; [CDC adult BMI categories](https://www.cdc.gov/bmi/adult-calculator/bmi-categories.html) support the product's BMI category labels; and the [NIDDK Body Weight Planner](https://www.niddk.nih.gov/bwp) is a reference for why body-weight change is dynamic. These sources inform the implementation boundary and do not validate this product's simplified projection.
+
 Resting energy expenditure uses the Mifflin–St Jeor equation:
 
 ```text
@@ -38,8 +40,8 @@ The date is explicitly labelled `simplified_energy_balance_v1`. For up to 365 da
 weight += (intake − expenditure) / 7700
 ```
 
-`7700 kcal/kg` is a simplified energy conversion assumption. It does not implement the Hall dynamic body-weight model and is not presented as clinically validated. If the target is not reached within 365 days, the result has `targetDate=null` and `projectionStatus=not_projected`; equal weight uses `maintenance`. A successful date is a scenario estimate that should be reviewed as real measurements change.
+`7700 kcal/kg` is a simplified energy conversion assumption. It does not implement the [Hall dynamic body-weight model](https://pmc.ncbi.nlm.nih.gov/articles/PMC3880593/) and is not presented as clinically validated. If the target is not reached within 365 days, the result has `targetDate=null` and `projectionStatus=not_projected`; equal weight uses `maintenance`. A successful date is a scenario estimate that should be reviewed as real measurements change.
 
 `Result.calculationDetails` stores the method, policy version, REE, TDEE, actual energy difference, projection status and assumptions for paid reports. Free responses expose only general method/range information and never expose exact calories, dates or calculation details.
 
-The model keeps Mifflin and the conservative product support domain because they are explainable and testable. A complete Hall implementation would require additional calibration and independent validation; an unlicensed public rewrite was reviewed but not copied or treated as validation evidence.
+The model keeps Mifflin and the conservative product support domain because they are explainable and testable. Clinical guidance such as the [AHA/ACC/TOS obesity guideline](https://pmc.ncbi.nlm.nih.gov/articles/PMC5819889/) and the [NHLBI evidence review](https://www.nhlbi.nih.gov/sites/default/files/media/docs/obesity-evidence-review.pdf) (pp. 70–71, examples of individualized calorie ranges and adjustment by weight/activity) is context for the product's safety boundary, not evidence that this demo's 1,200/1,500 kcal floors are safe for every person or that it gives medical advice. A complete Hall implementation would require additional calibration and independent validation; an unlicensed public rewrite was reviewed but not copied or treated as validation evidence.

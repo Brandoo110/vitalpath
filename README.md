@@ -23,9 +23,10 @@ npm run test:migration
 npm run test:http
 npm run test:http:failure-cleanup
 npm run test:browser
+npm run test:browser:failure-cleanup
 ```
 
-开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`test:browser` 用单 worker Chromium/本机已有 Chrome 跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试和 stale 恢复，并只删除本次 session。不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`test:browser` 使用单 worker Chromium；优先使用本机已有 Chrome，否则先运行 `npx playwright install chromium`。它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -41,7 +42,7 @@ erDiagram
 
 `Assessment.version` 是保存和提交的并发门禁；`Assessment.wellnessEligible` 只有用户明确确认适用性时才为 `true`，历史数据保持 `NULL`。`Result.assessmentId` 与 `sourceAssessmentVersion` 绑定产生它的测评快照，`algorithmVersion` 升级后旧结果失效；`targetDate` 和 `calculationDetails` 可空以保留未投影和历史结果。`Subscription.status` 是订阅唯一来源，API 为兼容性仍返回 `subscriptionStatus`。
 
-固定问卷元数据由历史 migration seed，扩展题当前全部可选；`active`、`required` 和 `valueType` 是固定定义的一致性校验字段，其中 `required` 不驱动动态提交校验，提交只校验固定核心健康字段。`valueType` 约束唯一答案列（text/number/boolean/single_choice/multi_choice）；本次 schema migration 会校验已有答案恰好一个值，并保留旧题目和历史答案，不在运行时静默重写 seed。
+固定问卷元数据由历史 migration seed，扩展题当前全部可选；`active`、`required` 和 `valueType` 是固定定义的一致性校验字段，其中 `required` 不驱动动态提交校验，提交只校验固定核心健康字段。`valueType` 描述答案列类型（text/number/boolean/single_choice/multi_choice）；数据库 migration 只约束答案恰好一个非空值。应用层在写入和读取时再校验固定题目定义、active/required/valueType、实际列、有限数值范围和枚举，因此错误历史行会返回结构化 `422 assessment_invalid`，不会静默跳过或生成部分结果。本次 schema migration 会保留旧题目和历史答案，不在运行时静默重写 seed。
 
 ## API
 
@@ -96,7 +97,7 @@ curl -X POST "$BASE_URL/api/pay" \
 
 ## 测试覆盖
 
-Vitest 使用本地 PostgreSQL；最终候选运行 `npm test -- --maxWorkers=1` 通过 10 个文件、61 个测试。测试重点覆盖 Mifflin/支持域、BMI 原始边界、目标方向、适用性确认、热量门槛、365 天投影、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证最新迁移保留旧用户/测评/答案/结果/订阅、历史 `wellnessEligible=NULL` 与 v1 来源语义、v2 可空结果列，以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 只在本次 Next 子进程输出 Ready 后发请求，并覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 还验证异常退出后的本次进程组、端口和 session 清理，以及端口占用时不向 dummy 服务发业务请求。`npm run test:browser` 是一 worker 真浏览器回归，不用 mock handler 代替 UI 证据。
+Vitest 使用本地 PostgreSQL；本轮最终候选运行 `npm test -- --maxWorkers=1` 通过 10 个文件、68 个测试。测试重点覆盖 Mifflin/支持域、BMI 原始边界、目标方向、适用性确认、热量门槛、365 天投影、等重塑形、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、错误列/错误枚举/题目定义漂移、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证最新迁移保留旧用户/测评/答案/结果/订阅、历史 `wellnessEligible=NULL` 与 v1 来源语义、v2 可空结果列，以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 只在本次 Next 子进程输出 Ready 后发请求，并覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 还验证异常退出后的本次进程组、端口和 session 清理，以及端口占用时不向 dummy 服务发业务请求。`npm run test:browser` 是单 worker 真浏览器回归，不用 mock handler 代替 UI 证据。
 
 未覆盖真实登录、真实支付 webhook、生产数据库迁移、压力/长稳、线上部署和临床有效性；这些超出本次模拟挑战授权与范围。
 
