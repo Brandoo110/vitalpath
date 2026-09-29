@@ -43,6 +43,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 2,
+        version: 0,
         data: {
           gender: "female",
           goal: "lose_weight",
@@ -79,6 +80,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 1,
+        version: 0,
         data: { gender: "male" },
       }),
     );
@@ -86,6 +88,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 1,
+        version: 1,
         data: { gender: "male" },
       }),
     );
@@ -105,6 +108,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 4,
+        version: 0,
         data: { goal: "get_toned" },
       }),
     );
@@ -112,6 +116,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 2,
+        version: 1,
         data: { activityLevel: "light" },
       }),
     );
@@ -132,6 +137,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 4,
+        version: 0,
         data: {
           pacePreference: "standard",
           workoutDaysPerWeek: 4,
@@ -203,6 +209,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 1,
+        version: 0,
         data: { age: 31 },
       }),
     );
@@ -244,30 +251,121 @@ describe("assessment persistence API", () => {
     expect(assessment.version).toBe(2);
   });
 
-  it("allows_patch_without_version_for_simple_clients", async () => {
+  it("requires_version_for_patch", async () => {
     const sessionId = await createSessionId();
 
-    await patchAssessment(
+    const response = await patchAssessment(
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 1,
         data: { age: 31 },
       }),
     );
-    const response = await patchAssessment(
-      jsonRequest("PATCH", "/api/assessment", {
-        sessionId,
-        step: 2,
-        data: { age: 32 },
-      }),
-    );
     const body = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(body.version).toBe(2);
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("bad_request");
+  });
+
+  it("allows_only_one_of_two_concurrent_patches_with_the_same_version", async () => {
+    const sessionId = await createSessionId();
+    const firstResponse = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 1,
+        version: 0,
+        data: { age: 31 },
+      }),
+    );
+    const firstBody = await firstResponse.json();
+
+    const responses = await Promise.all([
+      patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 2,
+          version: firstBody.version,
+          data: { heightCm: 170 },
+        }),
+      ),
+      patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 3,
+          version: firstBody.version,
+          data: { weightKg: 80 },
+        }),
+      ),
+    ]);
+
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(bodies.filter((body) => body.error === "version_conflict")).toHaveLength(1);
 
     const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
-    expect(assessment.age).toBe(32);
+    expect(assessment.version).toBe(2);
+    expect(Number(assessment.heightCm) === 170 || Number(assessment.weightKg) === 80).toBe(true);
+  });
+
+  it("serializes_competing_first_saves", async () => {
+    const sessionId = await createSessionId();
+    const responses = await Promise.all([
+      patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 1,
+          version: 0,
+          data: { age: 31 },
+        }),
+      ),
+      patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 2,
+          version: 0,
+          data: { age: 32 },
+        }),
+      ),
+    ]);
+
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(bodies.filter((body) => body.error === "version_conflict")).toHaveLength(1);
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(assessment.version).toBe(1);
+    expect([31, 32]).toContain(assessment.age);
+  });
+
+  it("rolls_back_consent_and_assessment_when_answer_persistence_fails", async () => {
+    const sessionId = await createSessionId();
+    const question = await prisma.questionnaireQuestion.findUniqueOrThrow({
+      where: { key: "pacePreference" },
+    });
+    await prisma.questionnaireQuestion.update({
+      where: { id: question.id },
+      data: { active: false },
+    });
+
+    try {
+      const response = await patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 4,
+          version: 0,
+          data: { pacePreference: "standard", healthDataConsent: true },
+        }),
+      );
+
+      expect(response.status).toBe(500);
+      expect(await prisma.assessment.findUnique({ where: { userId: sessionId } })).toBeNull();
+      const user = await prisma.user.findUniqueOrThrow({ where: { id: sessionId } });
+      expect(user.healthDataConsent).toBe(false);
+    } finally {
+      await prisma.questionnaireQuestion.update({
+        where: { id: question.id },
+        data: { active: true },
+      });
+    }
   });
 
   it("returns_404_for_unknown_uuid_session", async () => {
@@ -298,6 +396,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 1,
+        version: 0,
         data: {
           age: 121,
         },
@@ -316,6 +415,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 2,
+        version: 0,
         data: {
           age: "32; DROP TABLE users;",
           heightCm: null,
@@ -339,6 +439,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 4,
+        version: 0,
         data: {
           workoutDaysPerWeek: 8,
           sleepHours: 25,
@@ -361,6 +462,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 7,
+        version: 0,
         data: {
           workoutDaysPerWeek: 5,
           sessionMinutes: 150,
@@ -387,6 +489,7 @@ describe("assessment persistence API", () => {
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 7,
+        version: 0,
         data: {
           sessionMinutes: 241,
         },

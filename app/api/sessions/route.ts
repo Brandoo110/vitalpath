@@ -20,14 +20,14 @@ export async function POST(request: Request) {
       },
       select: {
         id: true,
-        subscriptionStatus: true,
+        subscription: { select: { status: true } },
       },
     });
 
     return jsonResponse(
       {
         sessionId: user.id,
-        subscriptionStatus: user.subscriptionStatus,
+        subscriptionStatus: user.subscription?.status ?? "free",
       },
       { status: 201 },
     );

@@ -25,6 +25,7 @@ type WorkoutLocation = "home" | "gym" | "mixed";
 type DietPreference = "balanced" | "high_protein" | "vegetarian" | "low_carb";
 type StressLevel = "low" | "medium" | "high";
 type MainBarrier = "no_time" | "cravings" | "motivation" | "knowledge" | "injury";
+type SubscriptionPlan = "trial" | "monthly" | "quarterly";
 
 type FormState = {
   gender: Gender | "";
@@ -134,9 +135,9 @@ type Option = {
   mark: string;
 };
 
-const sessionStorageKey = "health-funnel-session-id";
-const exitOfferStorageKey = "health-funnel-show-exit-offer";
-const retentionOfferStorageKey = "health-funnel-retention-offer-session-id";
+const sessionStorageKey = "vitalpath-session-id";
+const exitOfferStorageKey = "vitalpath-show-exit-offer";
+const retentionOfferStorageKey = "vitalpath-retention-offer-session-id";
 
 const initialForm: FormState = {
   gender: "",
@@ -447,7 +448,7 @@ export default function Home() {
         return;
       }
 
-      await submitAndLoadResults(sessionId, false);
+      await submitAndLoadResults(sessionId, false, body.version);
       setStatus("Report generated");
       setView("lead");
     } catch (caught) {
@@ -461,7 +462,7 @@ export default function Home() {
     }
   }
 
-  async function submitAndLoadResults(nextSessionId: string, switchView = true) {
+  async function submitAndLoadResults(nextSessionId: string, switchView = true, nextVersion = version) {
     setGenerating(true);
     try {
       await Promise.all([
@@ -469,7 +470,7 @@ export default function Home() {
           const submitResponse = await fetch("/api/assessment/submit", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ sessionId: nextSessionId }),
+            body: JSON.stringify({ sessionId: nextSessionId, version: nextVersion }),
           });
           await readBody<{ ok: true; resultId: string }>(submitResponse);
           await loadResults(nextSessionId, switchView);
@@ -529,7 +530,7 @@ export default function Home() {
     }
   }
 
-  async function unlockPlan() {
+  async function unlockPlan(plan: SubscriptionPlan = offerApplied ? "quarterly" : "monthly") {
     if (!sessionId || busy || !results?.needPaywall) return;
 
     try {
@@ -540,7 +541,7 @@ export default function Home() {
       const response = await fetch("/api/pay", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, plan: offerApplied ? "quarterly" : "monthly" }),
+        body: JSON.stringify({ sessionId, plan }),
       });
       await readBody(response);
       await loadResults(sessionId, true);
@@ -761,7 +762,7 @@ export default function Home() {
               </span>
             )}
             {locked ? (
-              <button className="topbar-cta" type="button" disabled={busy} onClick={unlockPlan}>
+              <button className="topbar-cta" type="button" disabled={busy} onClick={() => unlockPlan()}>
                 Get my plan
               </button>
             ) : (
@@ -1798,7 +1799,7 @@ function PaywallCard({
   busy: boolean;
   countdownSeconds: number;
   offerApplied: boolean;
-  onUnlock: () => void;
+  onUnlock: (plan: SubscriptionPlan) => void;
 }) {
   const [selected, setSelected] = useState("4weeks");
   const offerKind: OfferKind = offerApplied ? "retention" : "initial";
@@ -1838,7 +1839,12 @@ function PaywallCard({
         ))}
       </div>
 
-      <button className="coral-button" type="button" disabled={busy} onClick={onUnlock}>
+      <button
+        className="coral-button"
+        type="button"
+        disabled={busy}
+        onClick={() => onUnlock(planForTier(selected))}
+      >
         {offer.cta}
       </button>
 
@@ -1859,6 +1865,12 @@ function PaywallCard({
       </small>
     </section>
   );
+}
+
+function planForTier(tierId: string): SubscriptionPlan {
+  if (tierId === "1week") return "trial";
+  if (tierId === "12weeks") return "quarterly";
+  return "monthly";
 }
 
 function DiscountTimer({ seconds, inverted = false }: { seconds: number; inverted?: boolean }) {

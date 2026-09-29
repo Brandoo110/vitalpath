@@ -9,14 +9,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/health_funnel_ci?schema=public
-      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/health_funnel_ci?schema=public
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/vitalpath_ci?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/vitalpath_ci?schema=public
 
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: health_funnel_ci
+          POSTGRES_DB: vitalpath_ci
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
@@ -46,11 +46,20 @@ jobs:
       - name: Apply migrations
         run: npx prisma migrate deploy
 
+      - name: Verify migration upgrade and rollback
+        run: npm run test:migration
+
       - name: Lint
         run: npm run lint
 
       - name: Test
-        run: npm test
+        run: npm test -- --maxWorkers=1
 
       - name: Build
         run: npm run build
+
+      - name: HTTP smoke
+        run: npm run test:http
+
+      - name: HTTP smoke failure cleanup
+        run: npm run test:http:failure-cleanup

@@ -20,17 +20,17 @@ export const assessmentDataSchema = z
   .object({
     gender: z.enum(genders).optional(),
     goal: z.enum(goals).optional(),
-    age: z.number().int().min(13).max(120).optional(),
-    heightCm: z.number().min(50).max(300).optional(),
-    weightKg: z.number().min(20).max(500).optional(),
-    targetWeightKg: z.number().min(20).max(500).optional(),
+    age: z.number().finite().int().min(13).max(120).optional(),
+    heightCm: z.number().finite().min(50).max(300).optional(),
+    weightKg: z.number().finite().min(20).max(500).optional(),
+    targetWeightKg: z.number().finite().min(20).max(500).optional(),
     activityLevel: z.enum(activityLevels).optional(),
     pacePreference: z.enum(pacePreferences).optional(),
-    workoutDaysPerWeek: z.number().int().min(1).max(7).optional(),
-    sessionMinutes: z.number().int().min(10).max(240).optional(),
+    workoutDaysPerWeek: z.number().finite().int().min(1).max(7).optional(),
+    sessionMinutes: z.number().finite().int().min(10).max(240).optional(),
     workoutLocation: z.enum(workoutLocations).optional(),
     dietPreference: z.enum(dietPreferences).optional(),
-    sleepHours: z.number().min(0).max(16).optional(),
+    sleepHours: z.number().finite().min(0).max(16).optional(),
     stressLevel: z.enum(stressLevels).optional(),
     mainBarrier: z.enum(mainBarriers).optional(),
     healthDataConsent: z.boolean().optional(),
@@ -41,7 +41,7 @@ export const patchAssessmentSchema = z.object({
   sessionId: sessionIdSchema,
   // step 用于进度恢复；服务端会保证它只前进不后退。
   step: z.number().int().min(0).max(20),
-  version: z.number().int().min(0).optional(),
+  version: z.number().int().min(0),
   data: assessmentDataSchema,
 });
 
@@ -65,4 +65,9 @@ export const sessionRequestSchema = z.object({
 export const payRequestSchema = z.object({
   sessionId: sessionIdSchema,
   plan: z.enum(["trial", "monthly", "quarterly"]).optional(),
+});
+
+export const submitAssessmentSchema = z.object({
+  sessionId: sessionIdSchema,
+  version: z.number().int().min(0),
 });

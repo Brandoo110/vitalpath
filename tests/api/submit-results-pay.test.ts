@@ -20,12 +20,25 @@ afterEach(async () => {
 describe("submit, results and pay API", () => {
   const unknownSessionId = "22222222-2222-4222-8222-222222222222";
 
+  it("requires_version_for_submit", async () => {
+    const sessionId = await createSessionId();
+
+    const response = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("bad_request");
+  });
+
   it("rejects_missing_required_health_fields", async () => {
     const sessionId = await createSessionId();
     await patchAssessment(
       jsonRequest("PATCH", "/api/assessment", {
         sessionId,
         step: 2,
+        version: 0,
         data: {
           gender: "female",
           goal: "lose_weight",
@@ -34,7 +47,7 @@ describe("submit, results and pay API", () => {
     );
 
     const response = await submitAssessment(
-      jsonRequest("POST", "/api/assessment/submit", { sessionId }),
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
     );
     const body = await response.json();
 
@@ -57,7 +70,7 @@ describe("submit, results and pay API", () => {
     await saveCompleteAssessment(sessionId);
 
     const response = await submitAssessment(
-      jsonRequest("POST", "/api/assessment/submit", { sessionId }),
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
     );
     const body = await response.json();
 
@@ -73,35 +86,98 @@ describe("submit, results and pay API", () => {
     expect(result.targetDate.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it("updates_existing_result_on_repeat_submit", async () => {
+  it("returns_the_same_result_for_repeat_submit_at_the_same_version", async () => {
     const sessionId = await createSessionId();
     await saveCompleteAssessment(sessionId);
 
     const firstResponse = await submitAssessment(
-      jsonRequest("POST", "/api/assessment/submit", { sessionId }),
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
     );
     const firstBody = await firstResponse.json();
+    const firstResult = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
 
-    await patchAssessment(
-      jsonRequest("PATCH", "/api/assessment", {
-        sessionId,
-        step: 5,
-        data: {
-          weightKg: 70,
-        },
-      }),
-    );
     const secondResponse = await submitAssessment(
-      jsonRequest("POST", "/api/assessment/submit", { sessionId }),
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
     );
     const secondBody = await secondResponse.json();
 
     expect(secondResponse.status).toBe(200);
     expect(secondBody.resultId).toBe(firstBody.resultId);
+    const secondResult = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(secondResult.calculatedAt.getTime()).toBe(firstResult.calculatedAt.getTime());
+    expect(secondResult.targetDate.getTime()).toBe(firstResult.targetDate.getTime());
+  });
 
-    const results = await prisma.result.findMany({ where: { userId: sessionId } });
-    expect(results).toHaveLength(1);
-    expect(results[0].bmi).toBe(25.7);
+  it("invalidates_a_result_after_a_new_assessment_version", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+
+    const patchResponse = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 5,
+        version: 1,
+        data: { weightKg: 70 },
+      }),
+    );
+    expect(patchResponse.status).toBe(200);
+
+    const resultResponse = await getResults(
+      new Request(`http://localhost/api/results?sessionId=${sessionId}`),
+    );
+    const resultBody = await resultResponse.json();
+    expect(resultResponse.status).toBe(409);
+    expect(resultBody.error).toBe("assessment_stale");
+
+    const staleSubmitResponse = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    expect(staleSubmitResponse.status).toBe(409);
+    expect((await staleSubmitResponse.json()).error).toBe("version_conflict");
+
+    const freshSubmitResponse = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 2 }),
+    );
+    expect(freshSubmitResponse.status).toBe(200);
+    const result = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(result.bmi).toBe(25.7);
+  });
+
+  it("serializes_submit_and_patch_on_the_same_assessment_row", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+
+    const [submitResponse, patchResponse] = await Promise.all([
+      submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 })),
+      patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 5,
+          version: 1,
+          data: { weightKg: 70 },
+        }),
+      ),
+    ]);
+
+    expect(patchResponse.status).toBe(200);
+    expect([200, 409]).toContain(submitResponse.status);
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    const result = await prisma.result.findUnique({ where: { userId: sessionId } });
+    if (assessment.version === 1) {
+      expect(submitResponse.status).toBe(200);
+      expect(assessment.completed).toBe(true);
+      expect(result?.sourceAssessmentVersion).toBe(1);
+    } else {
+      expect(assessment.version).toBe(2);
+      expect(assessment.completed).toBe(false);
+      if (result) {
+        expect(result.sourceAssessmentVersion).toBe(1);
+        expect(submitResponse.status).toBe(200);
+      } else {
+        expect(submitResponse.status).toBe(409);
+      }
+    }
   });
 
   it("returns_assessment_not_submitted_before_result_exists", async () => {
@@ -122,7 +198,7 @@ describe("submit, results and pay API", () => {
   it("free_result_response_omits_all_protected_keys", async () => {
     const sessionId = await createSessionId();
     await saveCompleteAssessment(sessionId);
-    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId }));
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
 
     const response = await getResults(
       new Request(`http://localhost/api/results?sessionId=${sessionId}`),
@@ -174,7 +250,7 @@ describe("submit, results and pay API", () => {
   it("unlocks_full_result_after_pay_for_same_session", async () => {
     const sessionId = await createSessionId();
     await saveCompleteAssessment(sessionId);
-    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId }));
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
 
     const beforePayResponse = await getResults(
       new Request(`http://localhost/api/results?sessionId=${sessionId}`),
@@ -227,7 +303,6 @@ describe("submit, results and pay API", () => {
       where: { id: sessionId },
       include: { subscription: true },
     });
-    expect(user.subscriptionStatus).toBe("active");
     expect(user.subscription?.status).toBe("active");
   });
 
@@ -245,6 +320,42 @@ describe("submit, results and pay API", () => {
     const subscriptions = await prisma.subscription.findMany({ where: { userId: sessionId } });
     expect(subscriptions).toHaveLength(1);
     expect(subscriptions[0].status).toBe("active");
+  });
+
+  it("rejects_a_different_plan_for_an_active_subscription", async () => {
+    const sessionId = await createSessionId();
+
+    const firstResponse = await pay(
+      jsonRequest("POST", "/api/pay", { sessionId, plan: "monthly" }),
+    );
+    const firstBody = await firstResponse.json();
+    const conflictResponse = await pay(
+      jsonRequest("POST", "/api/pay", { sessionId, plan: "quarterly" }),
+    );
+    const conflictBody = await conflictResponse.json();
+
+    expect(firstResponse.status).toBe(200);
+    expect(conflictResponse.status).toBe(409);
+    expect(conflictBody.error).toBe("plan_conflict");
+    const subscription = await prisma.subscription.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(subscription.plan).toBe("monthly");
+    expect(subscription.paidAt?.toISOString()).toBe(firstBody.paidAt);
+  });
+
+  it("serializes_competing_first_payments_without_overwriting_the_winner", async () => {
+    const sessionId = await createSessionId();
+    const responses = await Promise.all([
+      pay(jsonRequest("POST", "/api/pay", { sessionId, plan: "monthly" })),
+      pay(jsonRequest("POST", "/api/pay", { sessionId, plan: "quarterly" })),
+    ]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(bodies.filter((body) => body.error === "plan_conflict")).toHaveLength(1);
+    const subscription = await prisma.subscription.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(subscription.status).toBe("active");
+    expect(["monthly", "quarterly"]).toContain(subscription.plan);
+    expect(subscription.paidAt).toBeInstanceOf(Date);
   });
 
   it("returns_404_for_unknown_pay_uuid_session", async () => {
@@ -275,9 +386,10 @@ async function createSessionId() {
 async function saveCompleteAssessment(sessionId: string) {
   await patchAssessment(
     jsonRequest("PATCH", "/api/assessment", {
-      sessionId,
-      step: 5,
-      data: {
+        sessionId,
+        step: 5,
+        version: 0,
+        data: {
         gender: "female",
         goal: "lose_weight",
         age: 32,

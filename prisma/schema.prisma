@@ -17,6 +17,12 @@ enum SubscriptionStatus {
   active
 }
 
+enum SubscriptionPlan {
+  trial
+  monthly
+  quarterly
+}
+
 enum Gender {
   male
   female
@@ -61,8 +67,6 @@ model User {
   /// 报告生成后收集的 lead 信息，用于恢复/发送计划；不阻塞前置问卷
   name               String?
   email              String?
-  /// 当前生效的订阅状态，鉴权直接读它（快）；明细见 Subscription 表
-  subscriptionStatus SubscriptionStatus @default(free)
   /// 健康数据使用同意（合规位，借鉴 BetterMe healthDataConsent）
   healthDataConsent  Boolean            @default(false)
 
@@ -98,6 +102,7 @@ model Assessment {
   updatedAt DateTime @updatedAt
 
   answers AssessmentAnswer[]
+  result  Result?
 
   @@map("assessments")
 }
@@ -149,11 +154,17 @@ model Result {
   userId String @unique
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  assessmentId            String     @unique
+  assessment              Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  sourceAssessmentVersion Int?
+
   bmi                 Float
   bmiCategory         BmiCategory
   recommendedCalories Int
   /// 预测达成目标的日期（非会员脱敏时隐藏）
   targetDate          DateTime
+  calculatedAt         DateTime @default(now())
+  algorithmVersion     String   @default("v1")
   createdAt           DateTime @default(now())
   updatedAt           DateTime @default(now()) @updatedAt
 
@@ -168,7 +179,7 @@ model Subscription {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   status    SubscriptionStatus @default(free)
-  plan      String?
+  plan      SubscriptionPlan?
   /// 模拟支付回调写入
   paidAt    DateTime?
   createdAt DateTime           @default(now())
