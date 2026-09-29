@@ -165,7 +165,12 @@ export async function upsertAssessmentAnswers(
     }
 
     const definition = extendedQuestionDefinitions.find((candidate) => candidate.key === key);
-    if (!definition || !question.active || question.valueType !== definition.valueType) {
+    if (
+      !definition ||
+      question.required !== definition.required ||
+      question.active !== definition.active ||
+      question.valueType !== definition.valueType
+    ) {
       throw new Error(`Question definition is inactive or has an incompatible type for ${key}`);
     }
 
