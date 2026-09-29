@@ -1,5 +1,6 @@
 import { jsonResponse, handleRouteError, readJson } from "@/lib/api";
 import { mapAnswerRows, splitAssessmentData, upsertAssessmentAnswers } from "@/lib/assessment-answers";
+import { lockAssessment, lockUser } from "@/lib/assessment-service";
 import { conflict, notFound } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import { patchAssessmentSchema, sessionRequestSchema } from "@/lib/validation";
@@ -64,31 +65,31 @@ export async function PATCH(request: Request) {
   try {
     const input = patchAssessmentSchema.parse(await readJson(request));
 
-    const user = await prisma.user.findUnique({
-      where: { id: input.sessionId },
-      include: { assessment: true },
-    });
+    const user = await prisma.user.findUnique({ where: { id: input.sessionId }, select: { id: true } });
 
     if (!user) {
       throw notFound("Session not found");
     }
 
-    const currentVersion = user.assessment?.version ?? 0;
-    if (input.version !== undefined && input.version !== currentVersion) {
-      // 客户端带 version 时启用乐观并发，防止旧请求覆盖新数据。
-      throw conflict("version_conflict", "Assessment version is stale", {
-        expectedVersion: currentVersion,
-        receivedVersion: input.version,
-      });
-    }
-
     const { healthDataConsent, ...assessmentData } = input.data;
     const { coreData, extendedAnswers } = splitAssessmentData(assessmentData);
     const updateData = stripUndefined(coreData);
-    // 乱序请求不能把进度往回写。
-    const nextStep = Math.max(user.assessment?.step ?? 0, input.step);
 
     const assessment = await prisma.$transaction(async (tx) => {
+      // Existing assessments are locked directly; first-save races use the
+      // user lock until the one-per-user assessment row has been created.
+      const lockedAssessmentId = await lockAssessment(tx, input.sessionId);
+      if (!lockedAssessmentId) await lockUser(tx, input.sessionId);
+
+      const current = await tx.assessment.findUnique({ where: { userId: input.sessionId } });
+      const currentVersion = current?.version ?? 0;
+      if (input.version !== currentVersion) {
+        throw conflict("version_conflict", "Assessment version is stale", {
+          expectedVersion: currentVersion,
+          receivedVersion: input.version,
+        });
+      }
+
       if (healthDataConsent !== undefined) {
         await tx.user.update({
           where: { id: input.sessionId },
@@ -97,20 +98,22 @@ export async function PATCH(request: Request) {
       }
 
       // 第一次保存时创建 assessment，之后每步只增量更新同一条记录。
-      const savedAssessment = user.assessment
+      const savedAssessment = current
         ? await tx.assessment.update({
             where: { userId: input.sessionId },
             data: {
               ...updateData,
-              step: nextStep,
+              // 乱序请求不能把进度往回写。
+              step: Math.max(current.step, input.step),
               version: { increment: 1 },
+              completed: false,
             },
           })
         : await tx.assessment.create({
             data: {
               userId: input.sessionId,
               ...updateData,
-              step: nextStep,
+              step: input.step,
               version: 1,
             },
           });

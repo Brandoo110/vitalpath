@@ -1,10 +1,11 @@
 import type { Assessment } from "@/app/generated/prisma/client";
 import { mapAnswerRows, type ExtendedAssessmentAnswers } from "@/lib/assessment-answers";
 import { handleRouteError, jsonResponse, readJson } from "@/lib/api";
-import { calculateHealthResult, type HealthInput } from "@/lib/health";
-import { notFound, unprocessable } from "@/lib/errors";
+import { assessmentWithAnswers, lockAssessment } from "@/lib/assessment-service";
+import { conflict, notFound, unprocessable } from "@/lib/errors";
+import { calculateHealthResult, healthAlgorithmVersion, type HealthInput } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
-import { sessionRequestSchema } from "@/lib/validation";
+import { submitAssessmentSchema } from "@/lib/validation";
 
 const requiredHealthFields = [
   "gender",
@@ -18,95 +19,115 @@ const requiredHealthFields = [
 
 export async function POST(request: Request) {
   try {
-    const { sessionId } = sessionRequestSchema.parse(await readJson(request));
+    const input = submitAssessmentSchema.parse(await readJson(request));
 
-    const user = await prisma.user.findUnique({
-      where: { id: sessionId },
-      include: {
-        assessment: {
-          include: { answers: { include: { question: true } } },
+    const result = await prisma.$transaction(async (tx) => {
+      await lockAssessment(tx, input.sessionId);
+      const user = await tx.user.findUnique({
+        where: { id: input.sessionId },
+        include: {
+          assessment: { include: assessmentWithAnswers },
+          result: true,
         },
-      },
+      });
+
+      if (!user) throw notFound("Session not found");
+
+      const assessment = user.assessment;
+      if (!assessment) {
+        return { kind: "incomplete" as const, missingFields: [...requiredHealthFields] };
+      }
+      if (input.version !== assessment.version) {
+        throw conflict("version_conflict", "Assessment version is stale", {
+          expectedVersion: assessment.version,
+          receivedVersion: input.version,
+        });
+      }
+
+      const missingFields = collectMissingFields(assessment);
+      if (missingFields.length > 0) {
+        return { kind: "incomplete" as const, missingFields };
+      }
+
+      if (
+        assessment.completed &&
+        user.result?.assessmentId === assessment.id &&
+        user.result.sourceAssessmentVersion === assessment.version &&
+        user.result.algorithmVersion === healthAlgorithmVersion
+      ) {
+        return { kind: "result" as const, resultId: user.result.id };
+      }
+
+      let calculatedResult: ReturnType<typeof calculateHealthResult>;
+      const calculatedAt = new Date();
+      try {
+        const extendedAnswers = mapAnswerRows(assessment.answers);
+        const resultInput = toHealthInput(assessment, extendedAnswers, calculatedAt);
+        calculatedResult = calculateHealthResult(resultInput);
+      } catch (error) {
+        throw unprocessable("assessment_invalid", errorMessage(error));
+      }
+
+      const savedResult = await tx.result.upsert({
+        where: { userId: input.sessionId },
+        create: {
+          userId: input.sessionId,
+          assessmentId: assessment.id,
+          sourceAssessmentVersion: assessment.version,
+          bmi: calculatedResult.bmi,
+          bmiCategory: calculatedResult.bmiCategory,
+          recommendedCalories: calculatedResult.recommendedCalories,
+          targetDate: calculatedResult.targetDate,
+          calculatedAt,
+          algorithmVersion: healthAlgorithmVersion,
+        },
+        update: {
+          assessmentId: assessment.id,
+          sourceAssessmentVersion: assessment.version,
+          bmi: calculatedResult.bmi,
+          bmiCategory: calculatedResult.bmiCategory,
+          recommendedCalories: calculatedResult.recommendedCalories,
+          targetDate: calculatedResult.targetDate,
+          calculatedAt,
+          algorithmVersion: healthAlgorithmVersion,
+        },
+      });
+
+      await tx.assessment.update({
+        where: { id: assessment.id },
+        data: { completed: true },
+      });
+
+      return { kind: "result" as const, resultId: savedResult.id };
     });
 
-    if (!user) {
-      throw notFound("Session not found");
-    }
-
-    const missingFields = collectMissingFields(user.assessment);
-    if (missingFields.length > 0) {
-      // 缺字段时不生成 result，避免把半成品测评误认为可展示结果。
+    if (result.kind === "incomplete") {
       return jsonResponse(
         {
           error: "assessment_incomplete",
           message: "Assessment is missing required health fields",
-          missingFields,
+          missingFields: result.missingFields,
         },
         { status: 422 },
       );
     }
 
-    let resultInput: HealthInput;
-    let calculatedResult: ReturnType<typeof calculateHealthResult>;
-    try {
-      const extendedAnswers = user.assessment ? mapAnswerRows(user.assessment.answers) : {};
-      resultInput = toHealthInput(user.assessment, extendedAnswers);
-      calculatedResult = calculateHealthResult(resultInput);
-    } catch (error) {
-      throw unprocessable("assessment_invalid", errorMessage(error));
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-      const upsertedResult = await tx.result.upsert({
-        where: { userId: sessionId },
-        create: {
-          userId: sessionId,
-          bmi: calculatedResult.bmi,
-          bmiCategory: calculatedResult.bmiCategory,
-          recommendedCalories: calculatedResult.recommendedCalories,
-          targetDate: calculatedResult.targetDate,
-        },
-        update: {
-          bmi: calculatedResult.bmi,
-          bmiCategory: calculatedResult.bmiCategory,
-          recommendedCalories: calculatedResult.recommendedCalories,
-          targetDate: calculatedResult.targetDate,
-        },
-      });
-
-      await tx.assessment.update({
-        where: { userId: sessionId },
-        data: { completed: true },
-      });
-
-      return upsertedResult;
-    });
-
-    return jsonResponse({
-      ok: true,
-      resultId: result.id,
-    });
+    return jsonResponse({ ok: true, resultId: result.resultId });
   } catch (error) {
     return handleRouteError(error);
   }
 }
 
 function collectMissingFields(assessment: Assessment | null) {
-  if (!assessment) {
-    return [...requiredHealthFields];
-  }
-
+  if (!assessment) return [...requiredHealthFields];
   return requiredHealthFields.filter((field) => assessment[field] === null);
 }
 
 function toHealthInput(
-  assessment: Assessment | null,
+  assessment: Assessment & { answers: Parameters<typeof mapAnswerRows>[0] },
   extendedAnswers: ExtendedAssessmentAnswers,
+  now: Date,
 ): HealthInput {
-  if (!assessment) {
-    throw new Error("Assessment not found");
-  }
-
   return {
     gender: assessment.gender as HealthInput["gender"],
     goal: assessment.goal as HealthInput["goal"],
@@ -116,6 +137,7 @@ function toHealthInput(
     targetWeightKg: assessment.targetWeightKg as number,
     activityLevel: assessment.activityLevel as HealthInput["activityLevel"],
     pacePreference: extendedAnswers.pacePreference,
+    now,
   };
 }
 

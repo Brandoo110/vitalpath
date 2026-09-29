@@ -14,6 +14,8 @@ export const extendedQuestionDefinitions = [
     label: "Preferred progress pace",
     section: "goal",
     valueType: "single_choice",
+    required: false,
+    active: true,
     sortOrder: 10,
   },
   {
@@ -21,6 +23,8 @@ export const extendedQuestionDefinitions = [
     label: "Workout days per week",
     section: "training",
     valueType: "number",
+    required: false,
+    active: true,
     sortOrder: 20,
   },
   {
@@ -28,6 +32,8 @@ export const extendedQuestionDefinitions = [
     label: "Session length in minutes",
     section: "training",
     valueType: "number",
+    required: false,
+    active: true,
     sortOrder: 30,
   },
   {
@@ -35,6 +41,8 @@ export const extendedQuestionDefinitions = [
     label: "Training place",
     section: "training",
     valueType: "single_choice",
+    required: false,
+    active: true,
     sortOrder: 40,
   },
   {
@@ -42,6 +50,8 @@ export const extendedQuestionDefinitions = [
     label: "Diet preference",
     section: "nutrition",
     valueType: "single_choice",
+    required: false,
+    active: true,
     sortOrder: 50,
   },
   {
@@ -49,6 +59,8 @@ export const extendedQuestionDefinitions = [
     label: "Average sleep hours",
     section: "recovery",
     valueType: "number",
+    required: false,
+    active: true,
     sortOrder: 60,
   },
   {
@@ -56,6 +68,8 @@ export const extendedQuestionDefinitions = [
     label: "Stress level",
     section: "recovery",
     valueType: "single_choice",
+    required: false,
+    active: true,
     sortOrder: 70,
   },
   {
@@ -63,6 +77,8 @@ export const extendedQuestionDefinitions = [
     label: "Main barrier",
     section: "behavior",
     valueType: "single_choice",
+    required: false,
+    active: true,
     sortOrder: 80,
   },
 ] as const;
@@ -146,6 +162,11 @@ export async function upsertAssessmentAnswers(
     const question = questionByKey.get(key);
     if (!question) {
       throw new Error(`Question definition is missing for ${key}`);
+    }
+
+    const definition = extendedQuestionDefinitions.find((candidate) => candidate.key === key);
+    if (!definition || !question.active || question.valueType !== definition.valueType) {
+      throw new Error(`Question definition is inactive or has an incompatible type for ${key}`);
     }
 
     const data = answerValueData(key, value);

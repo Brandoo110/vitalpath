@@ -7,6 +7,7 @@ import { sessionRequestSchema } from "@/lib/validation";
 
 const lockedFields = ["recommendedCalories", "targetDate"] as const;
 const lockedSections = ["weeklyWorkoutPlan", "nutritionPlan", "recoveryPlan", "dailyActions"] as const;
+const noStoreHeaders = { "Cache-Control": "private, no-store" };
 
 export async function GET(request: Request) {
   try {
@@ -22,6 +23,7 @@ export async function GET(request: Request) {
           include: { answers: { include: { question: true } } },
         },
         result: true,
+        subscription: true,
       },
     });
 
@@ -36,7 +38,34 @@ export async function GET(request: Request) {
           message: "Submit assessment before requesting results",
           nextAction: "continue_assessment",
         },
-        { status: 409 },
+        { status: 409, headers: noStoreHeaders },
+      );
+    }
+
+    if (!user.assessment) {
+      return jsonResponse(
+        {
+          error: "assessment_not_submitted",
+          message: "Submit assessment before requesting results",
+          nextAction: "continue_assessment",
+        },
+        { status: 409, headers: noStoreHeaders },
+      );
+    }
+
+    if (
+      !user.assessment.completed ||
+      user.result.assessmentId !== user.assessment.id ||
+      user.result.sourceAssessmentVersion === null ||
+      user.result.sourceAssessmentVersion !== user.assessment.version
+    ) {
+      return jsonResponse(
+        {
+          error: "assessment_stale",
+          message: "Assessment changed after the report was generated",
+          nextAction: "submit_assessment",
+        },
+        { status: 409, headers: noStoreHeaders },
       );
     }
 
@@ -47,11 +76,13 @@ export async function GET(request: Request) {
       ...extendedAnswers,
     });
 
-    if (user.subscriptionStatus === "active") {
+    const subscriptionStatus = user.subscription?.status ?? "free";
+
+    if (subscriptionStatus === "active") {
       // 会员结果返回完整字段；非会员路径绝不复用这个对象，避免误带保护字段。
       return jsonResponse({
         sessionId,
-        subscriptionStatus: user.subscriptionStatus,
+        subscriptionStatus,
         needPaywall: false,
         result: {
           bmi: user.result.bmi,
@@ -60,12 +91,12 @@ export async function GET(request: Request) {
           targetDate: user.result.targetDate.toISOString(),
           plan,
         },
-      });
+      }, { headers: noStoreHeaders });
     }
 
     return jsonResponse({
       sessionId,
-      subscriptionStatus: user.subscriptionStatus,
+      subscriptionStatus,
       needPaywall: true,
       result: {
         bmi: user.result.bmi,
@@ -75,9 +106,11 @@ export async function GET(request: Request) {
       },
       lockedFields,
       lockedSections,
-    });
+    }, { headers: noStoreHeaders });
   } catch (error) {
-    return handleRouteError(error);
+    const response = handleRouteError(error);
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
   }
 }
 
