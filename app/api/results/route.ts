@@ -1,3 +1,4 @@
+import { Prisma } from "@/app/generated/prisma/client";
 import { handleRouteError, jsonResponse } from "@/lib/api";
 import { mapAnswerRows } from "@/lib/assessment-answers";
 import { notFound } from "@/lib/errors";
@@ -16,16 +17,19 @@ export async function GET(request: Request) {
       sessionId: searchParams.get("sessionId") ?? "",
     });
 
-    const user = await prisma.user.findUnique({
-      where: { id: sessionId },
-      include: {
-        assessment: {
-          include: { answers: { include: { question: true } } },
+    const user = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe("SET TRANSACTION READ ONLY");
+      return tx.user.findUnique({
+        where: { id: sessionId },
+        include: {
+          assessment: {
+            include: { answers: { include: { question: true } } },
+          },
+          result: true,
+          subscription: true,
         },
-        result: true,
-        subscription: true,
-      },
-    });
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 
     if (!user) {
       throw notFound("Session not found");

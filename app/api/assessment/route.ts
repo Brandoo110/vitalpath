@@ -1,3 +1,4 @@
+import { Prisma } from "@/app/generated/prisma/client";
 import { jsonResponse, handleRouteError, readJson } from "@/lib/api";
 import { mapAnswerRows, splitAssessmentData, upsertAssessmentAnswers } from "@/lib/assessment-answers";
 import { lockAssessment, lockUser } from "@/lib/assessment-service";
@@ -12,14 +13,17 @@ export async function GET(request: Request) {
       sessionId: searchParams.get("sessionId") ?? "",
     });
 
-    const user = await prisma.user.findUnique({
-      where: { id: sessionId },
-      include: {
-        assessment: {
-          include: { answers: { include: { question: true } } },
+    const user = await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe("SET TRANSACTION READ ONLY");
+      return tx.user.findUnique({
+        where: { id: sessionId },
+        include: {
+          assessment: {
+            include: { answers: { include: { question: true } } },
+          },
         },
-      },
-    });
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 
     if (!user) {
       throw notFound("Session not found");
@@ -65,21 +69,15 @@ export async function PATCH(request: Request) {
   try {
     const input = patchAssessmentSchema.parse(await readJson(request));
 
-    const user = await prisma.user.findUnique({ where: { id: input.sessionId }, select: { id: true } });
-
-    if (!user) {
-      throw notFound("Session not found");
-    }
-
     const { healthDataConsent, ...assessmentData } = input.data;
     const { coreData, extendedAnswers } = splitAssessmentData(assessmentData);
     const updateData = stripUndefined(coreData);
 
     const assessment = await prisma.$transaction(async (tx) => {
-      // Existing assessments are locked directly; first-save races use the
-      // user lock until the one-per-user assessment row has been created.
-      const lockedAssessmentId = await lockAssessment(tx, input.sessionId);
-      if (!lockedAssessmentId) await lockUser(tx, input.sessionId);
+      // The user is the aggregate root: lock it before looking up the
+      // optional one-per-user assessment, including on the first save.
+      await lockUser(tx, input.sessionId);
+      await lockAssessment(tx, input.sessionId);
 
       const current = await tx.assessment.findUnique({ where: { userId: input.sessionId } });
       const currentVersion = current?.version ?? 0;
@@ -99,15 +97,11 @@ export async function PATCH(request: Request) {
 
       // 第一次保存时创建 assessment，之后每步只增量更新同一条记录。
       const savedAssessment = current
-        ? await tx.assessment.update({
-            where: { userId: input.sessionId },
-            data: {
-              ...updateData,
-              // 乱序请求不能把进度往回写。
-              step: Math.max(current.step, input.step),
-              version: { increment: 1 },
-              completed: false,
-            },
+        ? await updateExistingAssessment(tx, current.id, current.version, {
+            ...updateData,
+            // 乱序请求不能把进度往回写。
+            step: Math.max(current.step, input.step),
+            completed: false,
           })
         : await tx.assessment.create({
             data: {
@@ -132,6 +126,25 @@ export async function PATCH(request: Request) {
   } catch (error) {
     return handleRouteError(error);
   }
+}
+
+async function updateExistingAssessment(
+  tx: Parameters<typeof upsertAssessmentAnswers>[0],
+  assessmentId: string,
+  expectedVersion: number,
+  data: Record<string, unknown>,
+) {
+  const update = await tx.assessment.updateMany({
+    where: { id: assessmentId, version: expectedVersion },
+    data: { ...data, version: { increment: 1 } },
+  });
+  if (update.count !== 1) {
+    throw conflict("version_conflict", "Assessment version is stale", {
+      expectedVersion,
+      receivedVersion: expectedVersion,
+    });
+  }
+  return tx.assessment.findUniqueOrThrow({ where: { id: assessmentId } });
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T) {

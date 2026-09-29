@@ -1,7 +1,7 @@
 import type { Assessment } from "@/app/generated/prisma/client";
 import { mapAnswerRows, type ExtendedAssessmentAnswers } from "@/lib/assessment-answers";
 import { handleRouteError, jsonResponse, readJson } from "@/lib/api";
-import { assessmentWithAnswers, lockAssessment } from "@/lib/assessment-service";
+import { assessmentWithAnswers, lockAssessment, lockUser } from "@/lib/assessment-service";
 import { conflict, notFound, unprocessable } from "@/lib/errors";
 import { calculateHealthResult, healthAlgorithmVersion, type HealthInput } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
@@ -22,6 +22,7 @@ export async function POST(request: Request) {
     const input = submitAssessmentSchema.parse(await readJson(request));
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockUser(tx, input.sessionId);
       await lockAssessment(tx, input.sessionId);
       const user = await tx.user.findUnique({
         where: { id: input.sessionId },

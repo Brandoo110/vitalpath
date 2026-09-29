@@ -1,5 +1,7 @@
 # VitalPath
 
+[![CI](https://github.com/Brandoo110/vitalpath/actions/workflows/ci.yml/badge.svg)](https://github.com/Brandoo110/vitalpath/actions/workflows/ci.yml)
+
 VitalPath 是一个匿名健康测评 funnel 后端：分步保存与恢复、服务端健康计算、结果版本一致性、模拟订阅和免费/会员字段权限。仓库为独立 Git 项目，当前只完成本地代码与验证，尚未部署。
 
 - GitHub：<https://github.com/Brandoo110/vitalpath>
@@ -17,10 +19,12 @@ npx prisma migrate deploy
 npm test -- --maxWorkers=1
 npm run lint
 npm run build
+npm run test:migration
 npm run test:http
+npm run test:http:failure-cleanup
 ```
 
-`test:http` 会启动本地 production Next 服务，实际通过 HTTP 跑完整流程，最后只删除本次创建的 session。不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -36,6 +40,8 @@ erDiagram
 
 `Assessment.version` 是保存和提交的并发门禁；`Result.assessmentId` 与 `sourceAssessmentVersion` 绑定产生它的测评快照。`Subscription.status` 是订阅唯一来源，API 为兼容性仍返回 `subscriptionStatus`。旧结果的来源版本未知时保留 `NULL`，结果接口要求重新提交。
 
+固定问卷元数据由历史 migration seed：每个题目以 `active` 控制是否仍可写入、以 `required` 描述提交所需的扩展题、以 `valueType` 约束唯一答案列（text/number/boolean/single_choice/multi_choice）；本次 schema migration 会校验已有答案恰好一个值，并保留旧题目和历史答案，不在运行时静默重写 seed。
+
 ## API
 
 所有写接口使用 JSON；`sessionId` 必须是 UUID。`PATCH /api/assessment` 和 `POST /api/assessment/submit` 都必须携带当前整数 `version`。
@@ -46,7 +52,7 @@ erDiagram
 
 ### `GET /api/assessment?sessionId=…`
 
-返回保存的核心字段、扩展答案、`step`、`completed` 和当前 `version`。没有测评时返回 `assessment: null, version: 0`。
+返回保存的核心字段、扩展答案、`step`、`completed` 和当前 `version`。`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。没有测评时返回 `assessment: null, version: 0`。
 
 ### `PATCH /api/assessment`
 
@@ -89,7 +95,7 @@ curl -X POST "$BASE_URL/api/pay" \
 
 ## 测试覆盖
 
-Vitest 使用本地 PostgreSQL，当前 `npm test -- --maxWorkers=1` 通过 8 个文件、58 个测试。覆盖算法边界和非有限结果、分步保存/恢复、乱序 step、必传版本、真正并发 PATCH、submit/ PATCH 版本一致性、同版本重复 submit、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证合法旧数据保留/绑定和冲突迁移回滚。`npm run test:http` 通过真实 Next HTTP 服务覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果。
+Vitest 使用本地 PostgreSQL，运行 `npm test -- --maxWorkers=1`。测试重点覆盖算法边界和非有限结果、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证合法旧数据保留（用户、测评、答案、结果数值、订阅及未知来源版本）以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 通过真实 Next HTTP 服务覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 专门验证 smoke 异常退出后的进程和 session 清理。
 
 未覆盖真实登录、真实支付 webhook、生产数据库迁移、压力/长稳、线上部署和临床有效性；这些超出本次模拟挑战授权与范围。
 

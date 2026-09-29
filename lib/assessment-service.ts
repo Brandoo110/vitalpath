@@ -2,10 +2,15 @@ import { Prisma } from "@/app/generated/prisma/client";
 
 import { notFound } from "./errors";
 
-/**
- * PATCH and submit both serialize on the assessment row. The user-row lock is
- * only needed for the first PATCH, before that row exists.
- */
+type BeforeUserLockHook = (userId: string) => void | Promise<void>;
+
+let beforeUserLockHook: BeforeUserLockHook | null = null;
+
+/** Test-only scheduling seam; it never replaces the database lock. */
+export function setBeforeUserLockHook(hook: BeforeUserLockHook | null) {
+  beforeUserLockHook = hook;
+}
+
 export async function lockAssessment(tx: Prisma.TransactionClient, userId: string) {
   const rows = await tx.$queryRaw<Array<{ id: string }>>(
     Prisma.sql`SELECT "id" FROM "assessments" WHERE "userId" = ${userId} FOR UPDATE`,
@@ -14,6 +19,7 @@ export async function lockAssessment(tx: Prisma.TransactionClient, userId: strin
 }
 
 export async function lockUser(tx: Prisma.TransactionClient, userId: string) {
+  await beforeUserLockHook?.(userId);
   const rows = await tx.$queryRaw<Array<{ id: string }>>(
     Prisma.sql`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`,
   );

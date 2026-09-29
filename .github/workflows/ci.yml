@@ -46,6 +46,9 @@ jobs:
       - name: Apply migrations
         run: npx prisma migrate deploy
 
+      - name: Verify migration upgrade and rollback
+        run: npm run test:migration
+
       - name: Lint
         run: npm run lint
 
@@ -57,3 +60,6 @@ jobs:
 
       - name: HTTP smoke
         run: npm run test:http
+
+      - name: HTTP smoke failure cleanup
+        run: npm run test:http:failure-cleanup

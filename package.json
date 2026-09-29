@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:migration": "node scripts/verify-migration.mjs",
-    "test:http": "node scripts/http-smoke.mjs"
+    "test:http": "node scripts/http-smoke.mjs",
+    "test:http:failure-cleanup": "node scripts/http-smoke-failure.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",

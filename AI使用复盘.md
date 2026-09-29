@@ -1,6 +1,6 @@
 # AI 使用复盘
 
-本轮由 Codex 在用户冻结的后端计划、原题和现有代码范围内实施，Claude 作为只读审核角色保留在项目分工中。最终判断以 schema、事务代码、测试和本地 HTTP 证据为准。
+本轮由 Codex 按用户冻结的后端计划、原题和现有代码范围实施。最终判断以 schema、事务代码、测试和本地 HTTP 证据为准；本地证据不外推为线上部署或第三方服务证据。
 
 ## 竞品数据流分析
 
@@ -26,4 +26,4 @@ AI 先生成正常、异常和边界 payload，再人工收敛为 Vitest 用例�
 
 曾有一个简单方案建议继续保留 `users.subscriptionStatus`，并在支付时同时更新 User 与 Subscription。这个方案会产生双状态漂移：并发支付或部分失败时，结果接口可能读到与订阅明细不同的状态。因此本轮迁移前显式检查旧双状态冲突，然后删除 User 的重复字段，结果和支付只读取/写入 `Subscription.status`，API 仍兼容返回名为 `subscriptionStatus` 的字段。
 
-另一个被否决的测试思路是只用顺序调用或随机 `Promise.all` 证明并发；最终保留同一 version 的实际并行请求，并用数据库行锁实现确定性串行门禁，同时保留 stale version 和事务失败回滚测试。
+本次修正否决了 C1 中暴露的锁交接缺陷：旧实现对已有测评先锁 assessment，只有首次保存才锁 user，submit 也没有统一先锁 user，首次创建与提交因此没有一个共同的聚合根门禁。修正为 PATCH/submit 都先锁 user，再读取/锁 assessment；测试用可释放的真实数据库锁屏障控制请求交错，验证首次创建、既有 PATCH/submit 顺序和同版本 submit，而不依赖随机调度。
