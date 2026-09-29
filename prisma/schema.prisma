@@ -64,7 +64,7 @@ enum QuestionValueType {
 model User {
   id                 String             @id @default(uuid())
   createdAt          DateTime           @default(now())
-  /// 报告生成后收集的 lead 信息，用于恢复/发送计划；不阻塞前置问卷
+  /// 报告生成后收集的 lead 信息，用于关联当前 session；不阻塞前置问卷
   name               String?
   email              String?
   /// 健康数据使用同意（合规位，借鉴 BetterMe healthDataConsent）
