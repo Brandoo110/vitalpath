@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GET as getAssessment, PATCH as patchAssessment } from "@/app/api/assessment/route";
+import { POST as submitAssessment } from "@/app/api/assessment/submit/route";
 import { POST as createSession } from "@/app/api/sessions/route";
 import { prisma } from "@/lib/prisma";
 
@@ -26,6 +27,7 @@ describe("assessment persistence API", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(body).toEqual({
       sessionId,
       healthDataConsent: false,
@@ -33,6 +35,142 @@ describe("assessment persistence API", () => {
       step: 0,
       completed: false,
       version: 0,
+      nextStep: 0,
+      missingFields: [
+        "gender",
+        "age",
+        "heightCm",
+        "weightKg",
+        "targetWeightKg",
+        "goal",
+        "activityLevel",
+        "healthDataConsent",
+        "wellnessEligible",
+      ],
+      state: "empty",
+    });
+  });
+
+  it("derives_next_step_and_missing_fields_from_saved_core_data", async () => {
+    const sessionId = await createSessionId();
+
+    const patchResponse = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 4,
+        version: 0,
+        data: { gender: "female", healthDataConsent: true },
+      }),
+    );
+    const patchBody = await patchResponse.json();
+
+    expect(patchResponse.status).toBe(200);
+    expect(patchBody).toMatchObject({
+      ok: true,
+      step: 4,
+      version: 1,
+      completed: false,
+      nextStep: 1,
+      missingFields: [
+        "age",
+        "heightCm",
+        "weightKg",
+        "targetWeightKg",
+        "goal",
+        "activityLevel",
+        "wellnessEligible",
+      ],
+      state: "draft",
+    });
+
+    const getResponse = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+    );
+    expect(await getResponse.json()).toMatchObject({
+      nextStep: 1,
+      missingFields: expect.arrayContaining(["age", "wellnessEligible"]),
+      state: "draft",
+    });
+  });
+
+  it("does_not_create_an_empty_assessment_for_an_empty_patch", async () => {
+    const sessionId = await createSessionId();
+
+    const response = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 0,
+        data: {},
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      step: 0,
+      version: 0,
+      completed: false,
+      nextStep: 0,
+      state: "empty",
+    });
+    expect(await prisma.assessment.findUnique({ where: { userId: sessionId } })).toBeNull();
+  });
+
+  it("treats_semantically_identical_data_as_a_noop_but_real_changes_stale_a_report", async () => {
+    const sessionId = await createSessionId();
+    await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 9,
+        version: 0,
+        data: {
+          gender: "female",
+          goal: "lose_weight",
+          age: 32,
+          heightCm: 165,
+          weightKg: 72,
+          targetWeightKg: 62,
+          activityLevel: "light",
+          healthDataConsent: true,
+          wellnessEligible: true,
+        },
+      }),
+    );
+    await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+
+    const noOp = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 10,
+        version: 1,
+        data: { gender: "female" },
+      }),
+    );
+    expect(noOp.status).toBe(200);
+    expect(await noOp.json()).toMatchObject({
+      version: 1,
+      completed: true,
+      state: "completed",
+      nextStep: 10,
+    });
+
+    const changed = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 10,
+        version: 1,
+        data: { weightKg: 70 },
+      }),
+    );
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toMatchObject({
+      version: 2,
+      completed: false,
+      state: "stale",
+      nextStep: 9,
     });
   });
 
@@ -98,7 +236,7 @@ describe("assessment persistence API", () => {
 
     expect(count).toBe(1);
     expect(assessment.step).toBe(1);
-    expect(assessment.version).toBe(2);
+    expect(assessment.version).toBe(1);
   });
 
   it("does_not_regress_step_on_out_of_order_patch", async () => {
@@ -375,6 +513,7 @@ describe("assessment persistence API", () => {
     const body = await response.json();
 
     expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(body.error).toBe("not_found");
   });
 
