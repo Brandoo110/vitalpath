@@ -143,3 +143,5 @@
 }
 
 @media (max-width: 800px) { .editorial-results .plan-block { grid-template-columns: 1fr; gap: 16px; } }
+
+.editorial-results .report-meta { color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; margin-bottom: 20px; }

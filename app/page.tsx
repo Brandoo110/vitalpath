@@ -72,7 +72,14 @@ type AssessmentPayload = Partial<{
   wellnessEligible: boolean;
 }>;
 
-type AssessmentResponse = {
+type AssessmentProgress = {
+  nextStep?: number;
+  missingFields?: string[];
+  state?: "empty" | "draft" | "completed" | "stale";
+};
+type AssessmentSaveResponse = AssessmentProgress & { step: number; version: number; completed: boolean };
+
+type AssessmentResponse = AssessmentProgress & {
   sessionId: string;
   healthDataConsent: boolean;
   assessment: AssessmentPayload | null;
@@ -100,6 +107,7 @@ type ResultsResponse = {
   sessionId: string;
   subscriptionStatus: "free" | "active";
   needPaywall: boolean;
+  report?: { id: string; calculatedAt: string; algorithmVersion: string };
   lockedFields?: string[];
   lockedSections?: string[];
   result: {
@@ -181,6 +189,11 @@ const initialForm: FormState = {
   wellnessEligible: false,
 };
 
+const optionalFields = new Set<keyof FormState>([
+  "pacePreference", "workoutDaysPerWeek", "sessionMinutes", "workoutLocation",
+  "dietPreference", "sleepHours", "stressLevel", "mainBarrier",
+]);
+
 const initialLead: LeadState = {
   name: "",
   email: "",
@@ -219,7 +232,7 @@ const questionSteps: QuestionStep[] = [
     id: "pace",
     eyebrow: "Pace",
     title: "Choose the pace that feels realistic.",
-    description: "A sustainable pace keeps the recommendation safer and easier to follow.",
+    description: "Optional. Continue without a selection to use Standard. Gentle uses a smaller adjustment; Ambitious currently uses the same calorie policy as Standard.",
     fields: ["pacePreference"],
   },
   {
@@ -233,28 +246,28 @@ const questionSteps: QuestionStep[] = [
     id: "training",
     eyebrow: "Training rhythm",
     title: "Design your weekly training rhythm.",
-    description: "The plan adapts to your available days, session length and training place.",
+    description: "Optional. Add your available days, session length and training place, or continue with the plan defaults.",
     fields: ["workoutDaysPerWeek", "sessionMinutes", "workoutLocation"],
   },
   {
     id: "nutrition",
     eyebrow: "Nutrition",
     title: "Pick the eating style you can keep.",
-    description: "This does not replace medical advice; it only shapes practical plan copy.",
+    description: "Optional. Choose a preference or continue with balanced guidance. This does not replace medical advice.",
     fields: ["dietPreference"],
   },
   {
     id: "recovery",
     eyebrow: "Recovery",
     title: "How is your recovery baseline?",
-    description: "Sleep and stress adjust the recovery guidance in your final plan.",
+    description: "Optional. Add sleep and stress details, or continue with general recovery guidance.",
     fields: ["sleepHours", "stressLevel"],
   },
   {
     id: "barrier",
     eyebrow: "Final fit",
     title: "What usually gets in the way?",
-    description: "We use this to make the daily actions feel less generic.",
+    description: "Your main barrier is optional. Both confirmations below are required to generate your plan.",
     fields: ["mainBarrier", "healthDataConsent", "wellnessEligible"],
   },
 ];
@@ -293,6 +306,7 @@ export default function Home() {
   const [offerApplied, setOfferApplied] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan>("monthly");
   const [paymentConfirmed, setPaymentConfirmed] = useState(false);
+  const [pendingPaymentPlan, setPendingPaymentPlan] = useState<SubscriptionPlan | null>(null);
   const [exitOfferSeen, setExitOfferSeen] = useState(false);
   const [sessionWasRestored, setSessionWasRestored] = useState(false);
   const [conflictPending, setConflictPending] = useState(false);
@@ -395,6 +409,7 @@ export default function Home() {
       setSessionId(nextSessionId);
       setOfferApplied(false);
       setSelectedPlan("monthly");
+      setPendingPaymentPlan(null);
       setPaymentConfirmed(false);
       setConflictPending(false);
       setEditing(false);
@@ -439,6 +454,15 @@ export default function Home() {
     setServerStep(body.step);
     setForm(formFromAssessment(body));
 
+    setActiveStep(Math.max(0, Math.min(body.nextStep ?? body.step, questionSteps.length - 1)));
+    if (body.state === "stale") {
+      setResults(null);
+      setError("This report is out of date. Review the saved answers and generate it again.");
+      setStatus("Report needs review");
+      if (restoreCompletedView) setView("funnel");
+      return restoreCompletedView;
+    }
+
     if (body.completed && loadCompletedResult) {
       try {
         await loadResults(nextSessionId, restoreCompletedView);
@@ -456,8 +480,59 @@ export default function Home() {
       return true;
     }
 
-    setActiveStep(Math.min(body.step, questionSteps.length - 1));
     return false;
+  }
+
+  async function saveAnswers(data: AssessmentPayload, step: number, expectedVersion: number): Promise<AssessmentSaveResponse> {
+    try {
+      const response = await fetch("/api/assessment", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, step, version: expectedVersion, data }),
+      });
+      return await readBody<AssessmentSaveResponse>(response);
+    } catch (caught) {
+      const canReconcile = !(caught instanceof ApiClientError)
+        || caught.status >= 500 || caught.code === "version_conflict";
+      if (!canReconcile) throw caught;
+      let latest: AssessmentResponse;
+      try {
+        latest = await readBody<AssessmentResponse>(await fetch(`/api/assessment?sessionId=${encodeURIComponent(sessionId!)}`));
+      } catch {
+        throw new ApiClientError("We could not confirm whether your answers were saved. Your draft is preserved. Retry using the same saved version.", 0, "save_unconfirmed");
+      }
+      const matches = Object.entries(data).every(([field, value]) =>
+        (field === "healthDataConsent" ? latest.healthDataConsent : latest.assessment?.[field as keyof AssessmentPayload]) === value,
+      );
+      if (latest.version >= expectedVersion && matches) return latest;
+      if (latest.version !== expectedVersion) {
+        throw new ApiClientError("Your saved answers changed elsewhere. Your current draft is preserved.", 409, "version_conflict");
+      }
+      throw caught;
+    }
+  }
+
+  function showAssessmentError(caught: unknown, savedVersion?: number) {
+    setError(messageFrom(caught));
+    if (!(caught instanceof ApiClientError)) return false;
+    if (caught.code === "version_conflict") {
+      setConflictPending(true);
+      setError("Your saved answers changed elsewhere. Your current draft is preserved.");
+      return false;
+    }
+    const field = caught.issues?.[0]?.field ?? caught.missingFields?.[0];
+    const fieldStep = questionSteps.findIndex((step) => step.fields.includes(field as keyof FormState));
+    const nextStep = caught.nextStep ?? (fieldStep >= 0 ? fieldStep : undefined);
+    if (nextStep === undefined || nextStep < 0 || nextStep >= questionSteps.length) return false;
+    setActiveStep(nextStep);
+    setView("funnel");
+    setStatus("Review your answers");
+    if (savedVersion !== undefined) {
+      setSavedChangesPending(null);
+      setEditing(true);
+      setEditBaseline({ version: savedVersion });
+    }
+    return true;
   }
 
   async function continueStep() {
@@ -485,17 +560,13 @@ export default function Home() {
       setError(null);
       setStatus(activeStep === questionSteps.length - 1 ? "Generating plan" : "Saving answer");
 
-      const response = await fetch("/api/assessment", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sessionId,
-          step: activeStep + 1,
-          version,
-          data: payloadForStep(activeStep, form),
-        }),
-      });
-      const body = await readBody<{ step: number; version: number; completed: boolean }>(response);
+      const data = payloadForStep(activeStep, form);
+      if (Object.keys(data).length === 0 && activeStep < questionSteps.length - 1) {
+        setActiveStep((step) => step + 1);
+        setStatus("Optional step skipped");
+        return;
+      }
+      const body = await saveAnswers(data, activeStep + 1, version);
 
       setVersion(body.version);
       setServerStep(body.step);
@@ -511,12 +582,8 @@ export default function Home() {
       setStatus("Report generated");
       setView("lead");
     } catch (caught) {
-      setError(messageFrom(caught));
       setStatus("Save failed");
-      if (caught instanceof ApiClientError && caught.code === "version_conflict") {
-        setConflictPending(true);
-        setError("Your saved answers changed elsewhere. Your current draft is preserved.");
-      }
+      showAssessmentError(caught);
     } finally {
       setBusy(false);
     }
@@ -552,17 +619,7 @@ export default function Home() {
         (payload, _, step) => ({ ...payload, ...payloadForStep(step, form) }),
         {},
       );
-      const response = await fetch("/api/assessment", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sessionId,
-          step: questionSteps.length,
-          version: editBaseline.version,
-          data,
-        }),
-      });
-      const body = await readBody<{ step: number; version: number; completed: boolean }>(response);
+      const body = await saveAnswers(data, questionSteps.length, editBaseline.version);
 
       setVersion(body.version);
       setServerStep(body.step);
@@ -576,17 +633,14 @@ export default function Home() {
         setSavedChangesPending(null);
         setStatus("Plan updated");
       } catch (caught) {
+        if (showAssessmentError(caught, body.version)) return;
         setError(`Your answers were saved, but the updated plan could not be generated. Retry to continue. ${messageFrom(caught)}`);
         setStatus("Plan update needs retry");
         setView("funnel");
       }
     } catch (caught) {
-      setError(messageFrom(caught));
       setStatus("Save failed");
-      if (caught instanceof ApiClientError && caught.code === "version_conflict") {
-        setConflictPending(true);
-        setError("Your saved answers changed elsewhere. Your current draft is preserved.");
-      }
+      showAssessmentError(caught);
     } finally {
       setBusy(false);
     }
@@ -611,6 +665,7 @@ export default function Home() {
       setSavedChangesPending(null);
       setStatus("Plan updated");
     } catch (caught) {
+      if (showAssessmentError(caught, savedChangesPending.version)) return;
       setError(`Your answers are saved, but the updated plan is still unavailable. Retry again. ${messageFrom(caught)}`);
       setStatus("Plan update needs retry");
     } finally {
@@ -773,12 +828,24 @@ export default function Home() {
       setError(null);
       setStatus("Unlocking plan");
 
-      const response = await fetch("/api/pay", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, plan }),
-      });
-      await readBody(response);
+      const requestedPlan = pendingPaymentPlan ?? plan;
+      setPendingPaymentPlan(requestedPlan);
+      const pay = async () => {
+        const response = await fetch("/api/pay", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessionId, plan: requestedPlan }),
+        });
+        await readBody(response);
+      };
+      try {
+        await pay();
+      } catch (caught) {
+        if (caught instanceof ApiClientError && caught.status < 500) throw caught;
+        // The callback is idempotent for this same plan; never substitute another tier.
+        await pay();
+      }
+      setPendingPaymentPlan(null);
       setPaymentConfirmed(true);
       try {
         await loadResults(sessionId, true);
@@ -795,8 +862,14 @@ export default function Home() {
       window.sessionStorage.removeItem(exitOfferStorageKey);
       setStatus("Full plan unlocked");
     } catch (caught) {
-      setError(messageFrom(caught));
-      setStatus("Payment failed");
+      if (caught instanceof ApiClientError && caught.status >= 400 && caught.status < 500) {
+        setPendingPaymentPlan(null);
+        setError(messageFrom(caught));
+        setStatus("Payment rejected");
+      } else {
+        setError("We could not confirm the payment response. Retry the same plan to check its status.");
+        setStatus("Payment status unconfirmed");
+      }
     } finally {
       setBusy(false);
     }
@@ -841,10 +914,12 @@ export default function Home() {
         setForm(nextForm);
         setResults(latestResults);
         setEditBaseline({ version: assessment.version });
+        setActiveStep(Math.max(0, Math.min(assessment.nextStep ?? assessment.step, questionSteps.length - 1)));
       } else {
         await restoreAssessment(sessionId, false, false, false);
       }
       setConflictPending(false);
+      setSavedChangesPending(null);
       setStatus("Saved answers loaded");
     } catch (caught) {
       setError(`Saved answers could not be loaded. Your draft is still here. ${messageFrom(caught)}`);
@@ -870,6 +945,7 @@ export default function Home() {
     setActiveStep(0);
     setOfferApplied(false);
     setSelectedPlan("monthly");
+    setPendingPaymentPlan(null);
     setPaymentConfirmed(false);
     setConflictPending(false);
     setEditing(false);
@@ -1098,6 +1174,9 @@ export default function Home() {
 
         <section className="results-card" aria-label="Generated plan">
           <div className="result-hero">
+            {results.report ? (
+              <p className="report-meta">Calculated {new Date(results.report.calculatedAt).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })} · Model {results.report.algorithmVersion}</p>
+            ) : null}
             <p className="eyebrow">Your personalized plan</p>
             <h1>{planHeadline(locked)}</h1>
             <p className="support-copy">
@@ -1169,7 +1248,7 @@ export default function Home() {
               countdownSeconds={countdownSeconds}
               offerApplied={offerApplied}
               selectedPlan={selectedPlan}
-              onSelectPlan={setSelectedPlan}
+              onSelectPlan={(plan) => { if (!pendingPaymentPlan) setSelectedPlan(plan); }}
               onUnlock={unlockPlan}
             />
           ) : paymentConfirmed && results.needPaywall ? (
@@ -1204,6 +1283,7 @@ export default function Home() {
           <ExitOfferModal
             onClose={() => setOfferOpen(false)}
             onClaim={() => {
+              if (pendingPaymentPlan) return;
               if (sessionId) persistRetentionOfferSessionId(sessionId);
               setOfferApplied(true);
               setSelectedPlan("quarterly");
@@ -1386,7 +1466,7 @@ function StepFields({
         options={[
           { value: "gentle", label: "Gentle", helper: "Smaller changes, easier adherence.", mark: "G" },
           { value: "standard", label: "Standard", helper: "Balanced pace for most people.", mark: "S" },
-          { value: "aggressive", label: "Ambitious", helper: "Faster intent without unsafe deficits.", mark: "A" },
+          { value: "aggressive", label: "Ambitious", helper: "No additional calorie adjustment.", mark: "A" },
         ]}
         onChange={(value) => updateField("pacePreference", value as PacePreference)}
       />
@@ -2415,6 +2495,14 @@ function summaryLine(summary: {
 }
 
 function payloadForStep(step: number, form: FormState): AssessmentPayload {
+  const payload = rawPayloadForStep(step, form);
+  for (const field of optionalFields) {
+    if (form[field] === "") delete payload[field as keyof AssessmentPayload];
+  }
+  return payload;
+}
+
+function rawPayloadForStep(step: number, form: FormState): AssessmentPayload {
   if (step === 0) return { gender: form.gender as Gender };
   if (step === 1) return { age: toNumber(form.age) };
   if (step === 2) {
@@ -2450,7 +2538,7 @@ function payloadForStep(step: number, form: FormState): AssessmentPayload {
 
 function validateStep(step: number, form: FormState) {
   const errors: string[] = [];
-  const required = questionSteps[step].fields;
+  const required = questionSteps[step].fields.filter((field) => !optionalFields.has(field));
 
   for (const field of required) {
     if (field === "healthDataConsent") {
@@ -2555,6 +2643,11 @@ class ApiClientError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
+    readonly issues?: { field: string; message: string }[],
+    readonly nextStep?: number,
+    readonly nextAction?: string,
+    readonly missingFields?: string[],
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = "ApiClientError";
@@ -2563,13 +2656,22 @@ class ApiClientError extends Error {
 
 async function readBody<T = unknown>(response: Response): Promise<T> {
   const text = await response.text();
-  const body = parseJsonBody(text) as T & { message?: string; error?: string };
+  const body = parseJsonBody(text) as T & {
+    message?: string; error?: string;
+    issues?: { field: string; message: string }[];
+    nextStep?: number; nextAction?: string; missingFields?: string[]; details?: unknown;
+  };
 
   if (!response.ok) {
     throw new ApiClientError(
       body.message ?? body.error ?? `Request failed with status ${response.status}`,
       response.status,
       body.error,
+      body.issues,
+      body.nextStep,
+      body.nextAction,
+      body.missingFields,
+      body.details,
     );
   }
 
@@ -2634,6 +2736,9 @@ function countdownParts(seconds: number) {
 }
 
 function messageFrom(error: unknown) {
+  if (error instanceof ApiClientError && error.issues?.length) {
+    return error.issues.map((issue) => `${fieldLabel(issue.field as keyof FormState)}: ${issue.message}`).join("; ");
+  }
   return error instanceof Error ? error.message : "Unexpected error";
 }
 
