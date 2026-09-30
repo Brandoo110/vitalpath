@@ -7,7 +7,7 @@ import { healthAlgorithmVersion } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
 import { sessionRequestSchema } from "@/lib/validation";
 
-const lockedFields = ["recommendedCalories", "targetDate"] as const;
+const lockedFields = ["recommendedCalories", "targetDate", "calculationDetails"] as const;
 const lockedSections = ["weeklyWorkoutPlan", "nutritionPlan", "recoveryPlan", "dailyActions"] as const;
 const noStoreHeaders = { "Cache-Control": "private, no-store" };
 
@@ -88,6 +88,11 @@ export async function GET(request: Request) {
     });
 
     const subscriptionStatus = user.subscription?.status ?? "free";
+    const report = {
+      id: user.result.id,
+      calculatedAt: user.result.calculatedAt.toISOString(),
+      algorithmVersion: user.result.algorithmVersion,
+    };
 
     if (subscriptionStatus === "active") {
       // 会员结果返回完整字段；非会员路径绝不复用这个对象，避免误带保护字段。
@@ -95,6 +100,8 @@ export async function GET(request: Request) {
         sessionId,
         subscriptionStatus,
         needPaywall: false,
+        report,
+        lockedFields: [],
         result: {
           bmi: user.result.bmi,
           bmiCategory: user.result.bmiCategory,
@@ -110,6 +117,7 @@ export async function GET(request: Request) {
       sessionId,
       subscriptionStatus,
       needPaywall: true,
+      report,
       result: {
         bmi: user.result.bmi,
         bmiCategory: user.result.bmiCategory,

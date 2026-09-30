@@ -83,14 +83,29 @@ try {
   if (restored.version !== second.version || restored.assessment?.age !== 32) {
     throw new Error("assessment recovery did not return the saved version and fields");
   }
-  await request("/api/assessment/submit", json("POST", { sessionId, version: second.version }));
+  const committedSubmit = await fetch(`${baseUrl}/api/assessment/submit`, json("POST", {
+    sessionId,
+    version: second.version,
+  }));
+  if (!committedSubmit.ok) {
+    throw new Error(`initial submit failed: ${committedSubmit.status}`);
+  }
+  // The upstream committed successfully, but the client discards the response body.
+  await committedSubmit.arrayBuffer();
+  const replayedSubmit = await request("/api/assessment/submit", json("POST", {
+    sessionId,
+    version: second.version,
+  }));
+  if (!replayedSubmit.resultId) throw new Error("submit replay did not recover the committed result");
   const free = await request(`/api/results?sessionId=${sessionId}`);
-  if (!free.needPaywall || "recommendedCalories" in free.result || "targetDate" in free.result || "plan" in free.result) {
+  if (!free.needPaywall || "recommendedCalories" in free.result || "targetDate" in free.result || "plan" in free.result ||
+      free.report?.algorithmVersion !== "wellness-v2" || !free.lockedFields?.includes("calculationDetails")) {
     throw new Error("free results leaked protected fields");
   }
   await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
   const paid = await request(`/api/results?sessionId=${sessionId}`);
-  if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.plan || !paid.result.calculationDetails) {
+  if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.plan || !paid.result.calculationDetails ||
+      paid.report?.algorithmVersion !== "wellness-v2" || paid.lockedFields?.length !== 0) {
     throw new Error("paid results did not expose the complete report");
   }
   console.log("HTTP smoke passed", { sessionId, version: second.version });
