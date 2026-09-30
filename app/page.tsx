@@ -15,6 +15,7 @@ import {
   shouldShowFreshStartAction,
   type FunnelView,
 } from "@/lib/landing-state";
+import type { GeneratedPlan } from "@/lib/plan";
 import { buildPriceTiers, getOfferConfig, type OfferKind } from "@/lib/pricing";
 
 type Gender = "male" | "female";
@@ -94,15 +95,6 @@ type PlanPreview = {
   preview: string;
 };
 
-type PlanSection = PlanPreview & {
-  items: string[];
-};
-
-type PlanDetailGroup = {
-  title: string;
-  items: string[];
-};
-
 type ResultsResponse = {
   sessionId: string;
   subscriptionStatus: "free" | "active";
@@ -126,16 +118,7 @@ type ResultsResponse = {
       assumptions: Record<string, unknown>;
     };
     planPreview?: PlanPreview[];
-    plan?: {
-      summary: {
-        pacePreference: PacePreference;
-        workoutDaysPerWeek: number;
-        sessionMinutes: number;
-        workoutLocation: WorkoutLocation;
-        dietPreference: DietPreference;
-      };
-      sections: PlanSection[];
-    };
+    plan?: GeneratedPlan;
   };
 };
 
@@ -1189,7 +1172,7 @@ export default function Home() {
             <div className="bento-cell bento-projection">
               <div className="bento-label">
                 <ChartIcon />
-                <span>Weight projection</span>
+                <span>Your weight goal</span>
               </div>
               <WeightProjection
                 currentWeight={currentWeight}
@@ -1200,22 +1183,17 @@ export default function Home() {
 
             <BmiCell bmi={results.result.bmi} category={results.result.bmiCategory} />
 
-            <div className={`bento-cell bento-stat ${locked ? "locked" : ""}`}>
+            <div className="bento-cell bento-stat">
               <div className="bento-label">
                 <FlameIcon />
                 <span>Daily intake</span>
               </div>
-              <strong className={locked ? "locked-value" : ""}>
+              <strong>
                 {locked
-                  ? results.result.recommendedCaloriesRange ?? "0000"
+                  ? results.result.recommendedCaloriesRange ?? "Not available"
                   : `${results.result.recommendedCalories}`}
               </strong>
-              <small>{locked ? "kcal range hidden" : "kcal per day"}</small>
-              {locked ? (
-                <span className="lock-tag">
-                  <LockIcon /> Locked
-                </span>
-              ) : null}
+              <small>{locked ? "kcal per day · estimated range" : "kcal per day"}</small>
             </div>
 
             <div className={`bento-cell bento-stat ${locked ? "locked" : ""}`}>
@@ -1223,8 +1201,8 @@ export default function Home() {
                 <TargetIcon />
                 <span>Goal date</span>
               </div>
-              <strong className={locked ? "locked-value" : ""}>
-                {locked ? "Mmm 00" : targetDate ? shortDate(targetDate) : projectionStatus === "maintenance" ? "Maintenance" : "No date estimated"}
+              <strong>
+                {locked ? "Unlock to view" : targetDate ? shortDate(targetDate) : projectionStatus === "maintenance" ? "Maintenance" : "No date estimated"}
               </strong>
               <small>{locked ? "scenario outcome hidden" : targetDate ? "scenario estimate" : projectionStatus === "maintenance" ? "equal-weight scenario" : "outside one-year scenario"}</small>
               {locked ? (
@@ -1235,10 +1213,10 @@ export default function Home() {
             </div>
           </div>
 
+          <ReportInterpretation results={results} />
+
           <div className="report-section-heading"><span>02 / Your everyday</span><h2 className="section-title">Small steps. A clear direction.</h2></div>
           <PlanSections results={results} onUnlock={() => unlockPlan(selectedPlan)} busy={busy} />
-
-          <MilestoneTimeline targetDate={targetDate} projectionStatus={projectionStatus} />
 
           <MethodNote />
 
@@ -1705,14 +1683,15 @@ function WeightProjection({
 }) {
   const hasWeights = Number.isFinite(currentWeight) && Number.isFinite(targetWeight);
   const isLoss = hasWeights ? targetWeight < currentWeight : true;
-  const curvePath = isLoss
+  const isMaintenance = hasWeights && currentWeight === targetWeight;
+  const curvePath = isMaintenance ? "M14,85 L506,85" : isLoss
     ? "M14,34 C150,40 210,104 300,112 S470,138 506,140"
     : "M14,140 C150,138 210,70 300,60 S470,36 506,34";
   const fillPath = `${curvePath} L506,160 L14,160 Z`;
-  const startY = isLoss ? 34 : 140;
-  const endY = isLoss ? 140 : 34;
-  const labelY = isLoss ? 24 : 154;
-  const targetLabelY = isLoss ? 132 : 48;
+  const startY = isMaintenance ? 85 : isLoss ? 34 : 140;
+  const endY = isMaintenance ? 85 : isLoss ? 140 : 34;
+  const labelY = isMaintenance ? 65 : isLoss ? 24 : 154;
+  const targetLabelY = isMaintenance ? 65 : isLoss ? 132 : 48;
   const currentLabel = hasWeights ? `${formatKg(currentWeight)} kg` : "Current weight";
   const endTag = locked
     ? hasWeights
@@ -1723,8 +1702,8 @@ function WeightProjection({
       : "Target weight";
 
   return (
-    <div className={`projection-panel ${locked ? "locked" : ""}`} aria-label="Weight projection">
-      <svg className="weight-curve" viewBox="0 0 520 170" role="img" aria-label="Weight projection curve">
+    <div className={`projection-panel ${locked ? "locked" : ""}`} aria-label="Weight goal illustration">
+      <svg className="weight-curve" viewBox="0 0 520 170" role="img" aria-label="Illustration of current and target weight, not a predicted trajectory">
         <defs>
           <linearGradient id="wcFill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stopColor="#315347" stopOpacity="0.16" />
@@ -1757,6 +1736,7 @@ function WeightProjection({
           {endTag}
         </text>
       </svg>
+      <p className="report-lock-note">Goal illustration only, not a predicted weight trajectory.</p>
     </div>
   );
 }
@@ -1811,324 +1791,118 @@ function BmiCell({ bmi, category }: { bmi: number; category: string }) {
   );
 }
 
-const planMeta: Record<
-  string,
-  { icon: () => ReactElement; lockedMore: string; previewLabel: string }
-> = {
-  workout: { icon: RunIcon, lockedMore: "6 more days", previewLabel: "Day 1 preview" },
-  nutrition: { icon: SaladIcon, lockedMore: "20 meals", previewLabel: "Sample meal" },
-  recovery: { icon: MoonIcon, lockedMore: "Full guide", previewLabel: "First step" },
-  daily_actions: { icon: ChecklistIcon, lockedMore: "Daily steps", previewLabel: "Today's action" },
+const planMeta: Record<string, () => ReactElement> = {
+  workout: RunIcon,
+  nutrition: SaladIcon,
+  recovery: MoonIcon,
+  daily_actions: ChecklistIcon,
 };
 
-const fallbackLockedPlanSections: PlanPreview[] = [
-  {
-    id: "nutrition",
-    title: "Nutrition plan",
-    preview: "Meal structure, portions and weekly calorie adjustments.",
-  },
-  {
-    id: "recovery",
-    title: "Recovery plan",
-    preview: "Sleep, stress and low-intensity recovery rules.",
-  },
-  {
-    id: "daily_actions",
-    title: "Daily actions",
-    preview: "Daily checklist, habit triggers and progress review.",
-  },
-];
+function ReportInterpretation({ results }: { results: ResultsResponse }) {
+  const details = results.needPaywall ? undefined : results.result.calculationDetails;
+  const multiplier = details?.assumptions.activityMultiplier;
+  const fixedActivity = details?.assumptions.fixedActivityLevel;
+  const displayEnergy = (value: number) => `${Math.round(value).toLocaleString("en-US")} kcal/day`;
+  return (
+    <section className="report-reading" aria-label="Understanding your results">
+      <h2 className="section-title">What these numbers mean</h2>
+      <p>BMI is a height-and-weight screening measure, not a measure of body fat or a diagnosis. Your result is {results.result.bmi.toFixed(1)} ({titleCase(results.result.bmiCategory)}); it cannot describe your health on its own.</p>
+      {details ? (
+        <>
+          <dl className="energy-breakdown" data-testid="energy-breakdown">
+            <div><dt>01 · Estimated resting energy</dt><dd>{displayEnergy(details.REE)}</dd><p>Energy estimated for basic functions at rest.</p></div>
+            <div><dt>02 · Activity assumption</dt><dd>{typeof multiplier === "number" ? `× ${multiplier}` : "Not available"}</dd><p>{typeof fixedActivity === "string" ? `${titleCase(fixedActivity)} activity held constant in this scenario.` : "Based on the activity answer used for this report."}</p></div>
+            <div><dt>03 · Estimated daily expenditure</dt><dd>{displayEnergy(details.TDEE)}</dd><p>Resting energy with the selected activity adjustment.</p></div>
+            <div><dt>04 · Intake difference</dt><dd>{details.actualEnergyDifference > 0 ? "+" : ""}{displayEnergy(details.actualEnergyDifference)}</dd><p>Suggested intake minus estimated expenditure: negative means a deficit; positive means a surplus.</p></div>
+          </dl>
+          <p>The suggested intake is {typeof results.result.recommendedCalories === "number" ? displayEnergy(results.result.recommendedCalories) : "not available"}. These are model estimates, not measured energy needs. Standard and Ambitious use the same calorie policy; choosing Ambitious does not promise faster results.</p>
+          <div className="projection-explanation" data-testid="projection-explanation">
+            <h3>Your goal scenario</h3>
+            <p>{details.projectionStatus === "maintenance"
+              ? "Equal current and target weight is treated as maintenance. There is no arrival date to predict."
+              : details.projectionStatus === "not_projected"
+                ? "This fixed-intake scenario does not reach your target within one year. That is a limit of this scenario, not proof that your goal is impossible."
+                : results.result.targetDate
+                  ? `The model reaches the target around ${shortDate(results.result.targetDate)}. This is a conditional estimate, not a deadline or guarantee.`
+                  : "A projected scenario was returned without a date. No arrival date can be displayed."}</p>
+            <p>The scenario holds intake and activity constant while estimating changing energy needs. Real routines and weight trends vary. A weight-gain estimate does not mean the gain will be entirely muscle.</p>
+          </div>
+        </>
+      ) : (
+        <p className="report-lock-note">The free report includes your BMI, calorie range and plan previews. Unlock to read the energy breakdown, recommendation basis and first-week template.</p>
+      )}
+    </section>
+  );
+}
 
-function PlanSections({
-  results,
-  onUnlock,
-  busy,
-}: {
+function PlanSections({ results, onUnlock, busy }: {
   results: ResultsResponse;
   onUnlock: () => void;
   busy: boolean;
 }) {
-  if (results.result.plan) {
+  const plan = !results.needPaywall ? results.result.plan : undefined;
+  if (plan) {
     return (
-      <div className="plan-stack">
-        <h2 className="section-title">What your plan includes</h2>
-        {results.result.plan.summary ? (
-          <p className="plan-summary-line">
-            {summaryLine(results.result.plan.summary)}
-          </p>
-        ) : null}
-        {results.result.plan.sections.map((section) => {
-          const Icon = planMeta[section.id]?.icon ?? CheckIcon;
-          return (
-            <section className="plan-block" key={section.id}>
-              <div className="plan-block-head">
-                <span className="plan-icon">
-                  <Icon />
-                </span>
-                <div className="plan-block-copy">
-                  <p className="eyebrow">{section.title}</p>
-                  <h3>{section.preview}</h3>
-                </div>
+      <>
+        <section className="report-basis" aria-label="What your plan is based on" data-testid="plan-basis">
+          <h2 className="section-title">What your plan is based on</h2>
+          <p>Your answers shape the suggestions below. Unanswered preferences use starting guidance, not assumptions about your habits.</p>
+          <dl className="basis-grid">
+            {plan.basis.map((entry) => (
+              <div key={entry.field} data-field={entry.field}>
+                <dt>{entry.label}</dt><dd>{entry.value}</dd>
+                <span className={`basis-source ${entry.source}`}>{entry.source === "answer" ? "Your answer" : "Not answered · Default guidance"}</span>
               </div>
-              <PlanDetailGroups groups={fullPlanDetailGroups(section)} />
-            </section>
-          );
-        })}
-      </div>
+            ))}
+          </dl>
+        </section>
+        <div className="plan-stack">
+          {plan.sections.map((section) => {
+            const Icon = planMeta[section.id] ?? CheckIcon;
+            return (
+              <section className="plan-block" key={section.id} data-plan-section={section.id}>
+                <div className="plan-block-head"><span className="plan-icon"><Icon /></span>
+                  <div className="plan-block-copy"><p className="eyebrow">{section.title}</p><h3>{section.preview}</h3></div>
+                </div>
+                <div className="report-section-detail">
+                  <p className="plan-rationale"><strong>Why this suggestion</strong><span>{section.rationale}</span></p>
+                  <ul className="plan-items">{section.items.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+        <section className="report-week" aria-label="Your first week" data-testid="first-week">
+          <div className="report-section-heading"><span>03 / Put it into practice</span><h2 className="section-title">Your first week</h2></div>
+          <p>A starting template you can move around your week. Open a day to see its actions.</p>
+          <div className="week-list">{plan.firstWeek.map((day) => (
+            <details key={day.day} className="week-day">
+              <summary><span className="day-number">Day {day.day}</span><span>{day.title}</span></summary>
+              <ul className="plan-items">{day.actions.map((action, index) => <li key={index}>{action}</li>)}</ul>
+            </details>
+          ))}</div>
+        </section>
+        <section className="report-review" aria-label="Review your week" data-testid="plan-review">
+          <div className="report-section-heading"><span>04 / Pause and reflect</span><h2 className="section-title">Review your week</h2></div>
+          <ul className="review-prompts">{plan.reviewPrompts.map((prompt, index) => <li key={index}><span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span><p>{prompt}</p></li>)}</ul>
+        </section>
+      </>
     );
   }
-
   const preview = results.result.planPreview ?? [];
-  const previewSections = previewPlanSections(preview);
-
   return (
     <div className="plan-stack">
-      <h2 className="section-title">What your plan includes</h2>
-      <p className="plan-summary-line">
-        A complete 4-part routine is already drafted from your answers. Each section shows one
-        preview line now; the full detail unlocks with the subscription.
-      </p>
-      {previewSections.map((section) => {
-        const meta = planMeta[section.id];
-        const Icon = meta?.icon ?? CheckIcon;
+      <p className="plan-summary-line">A preview of your suggestions. The full report adds their basis, practical actions, a first-week template and review prompts.</p>
+      {preview.map((section) => {
+        const Icon = planMeta[section.id] ?? CheckIcon;
         return (
-          <section className="plan-block teaser preview-open" key={section.id}>
-            <div className="plan-block-head">
-              <span className="plan-icon">
-                <Icon />
-              </span>
-              <div className="plan-block-copy">
-                <p className="eyebrow">{section.title}</p>
-                <h3>{section.preview}</h3>
-              </div>
-              <span className="preview-chip">
-                {meta?.previewLabel ?? "Preview"}
-              </span>
-            </div>
-            <PlanDetailGroups groups={previewPlanDetailGroups(section)} lockedFromIndex={0} />
-            <div className="teaser-blur" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
+          <section className="plan-block" key={section.id}>
+            <div className="plan-block-head"><span className="plan-icon"><Icon /></span><div className="plan-block-copy"><p className="eyebrow">{section.title}</p><h3>{section.preview}</h3></div></div>
+            <p className="report-lock-note"><LockIcon /> Full recommendations and their basis are included in the unlocked report.</p>
           </section>
         );
       })}
-      <button className="plan-unlock-strip" type="button" disabled={busy} onClick={onUnlock}>
-        <LockIcon />
-        Unlock all {previewSections.length} sections and your full weekly schedule
-        <ArrowIcon />
-      </button>
-    </div>
-  );
-}
-
-function PlanDetailGroups({
-  groups,
-  locked = false,
-  lockedFromIndex,
-}: {
-  groups: PlanDetailGroup[];
-  locked?: boolean;
-  lockedFromIndex?: number;
-}) {
-  return (
-    <div className={`plan-detail-groups ${locked ? "is-locked" : ""}`}>
-      {groups.map((group, index) => (
-        <div
-          className={`plan-detail-group ${
-            lockedFromIndex !== undefined && index >= lockedFromIndex ? "is-blurred" : ""
-          }`}
-          key={group.title}
-        >
-          <strong>{group.title}</strong>
-          <ul className="plan-items">
-            {group.items.map((item, index) => (
-              <li key={`${group.title}-${index}`}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function fullPlanDetailGroups(section: PlanSection): PlanDetailGroup[] {
-  const [first, second, third] = section.items;
-
-  if (section.id === "workout") {
-    return [
-      {
-        title: "Weekly structure",
-        items: [
-          first ?? section.preview,
-          second ?? "Keep each session short enough to complete on normal workdays.",
-        ],
-      },
-      {
-        title: "Execution notes",
-        items: [
-          third ?? "Use a lighter mobility day when soreness or stress is high.",
-          "Treat missed sessions as reschedules, not failures, so the week stays recoverable.",
-        ],
-      },
-      {
-        title: "Progress check",
-        items: [
-          "Track completion, energy and soreness after each session.",
-          "Only raise intensity after one consistent week, not after one strong day.",
-        ],
-      },
-    ];
-  }
-
-  if (section.id === "nutrition") {
-    return [
-      {
-        title: "Meal framework",
-        items: [
-          first ?? section.preview,
-          second ?? "Plan snacks before the low-energy window so choices stay deliberate.",
-        ],
-      },
-      {
-        title: "Adjustment rule",
-        items: [
-          third ?? "Adjust portions weekly based on weight trend, not one noisy day.",
-          "Keep the target simple: repeat meals that work before adding variety.",
-        ],
-      },
-      {
-        title: "What to watch",
-        items: [
-          "Use hunger, sleep and training performance as checks against an overly aggressive deficit.",
-          "If adherence drops, simplify the meal template before changing the goal.",
-        ],
-      },
-    ];
-  }
-
-  if (section.id === "recovery") {
-    return [
-      {
-        title: "Baseline rule",
-        items: [
-          first ?? section.preview,
-          second ?? "Choose lower intensity when stress is elevated.",
-        ],
-      },
-      {
-        title: "Recovery signals",
-        items: [
-          third ?? "Track energy for the first week before raising volume.",
-          "Poor sleep, heavy soreness or low motivation move the next session down one level.",
-        ],
-      },
-      {
-        title: "Why it matters",
-        items: [
-          "Recovery protects consistency, which matters more than any single hard workout.",
-          "The plan is designed to progress without forcing crash-diet or burnout patterns.",
-        ],
-      },
-    ];
-  }
-
-  return [
-    {
-      title: "Daily anchor",
-      items: [
-        first ?? section.preview,
-        second ?? "Block the action in your calendar before the day starts.",
-      ],
-    },
-    {
-      title: "Friction control",
-      items: [
-        third ?? "Review the plan each evening and choose tomorrow's smallest action.",
-        "Keep the next step visible so you do not have to decide under stress.",
-      ],
-    },
-    {
-      title: "End-of-day review",
-      items: [
-        "Mark the action complete, skipped or rescheduled.",
-        "Use the review to make tomorrow easier, not to punish today's miss.",
-      ],
-    },
-  ];
-}
-
-function previewPlanDetailGroups(section: PlanPreview): PlanDetailGroup[] {
-  return [
-    {
-      title: "Unlock adds",
-      items: [
-        previewDetailLine(section.id),
-        `The full version expands this into ${planMeta[section.id]?.lockedMore.toLowerCase() ?? "more detail"}.`,
-        "Member results also reveal the protected calories, target timing and complete execution order.",
-      ],
-    },
-  ];
-}
-
-function previewPlanSections(preview: PlanPreview[]) {
-  const usedIds = new Set(preview.map((section) => section.id));
-  const fallback = fallbackLockedPlanSections.filter((section) => !usedIds.has(section.id));
-  return [...preview, ...fallback].slice(0, 4);
-}
-
-function previewDetailLine(sectionId: string) {
-  if (sectionId === "workout") return "You can see the weekly training rhythm before unlocking the exact progression.";
-  if (sectionId === "nutrition") return "You can see the nutrition direction before unlocking meals and portion rules.";
-  if (sectionId === "recovery") return "You can see the recovery baseline before unlocking stress and sleep adjustments.";
-  return "You can see the first daily anchor before unlocking the full checklist.";
-}
-
-function MilestoneTimeline({
-  targetDate,
-  projectionStatus,
-}: {
-  targetDate?: string | null;
-  projectionStatus?: "projected" | "not_projected" | "maintenance";
-}) {
-  const milestones = [
-    {
-      tag: "Start",
-      title: "Build a repeatable routine",
-      body: "Use the saved routine as a starting point and adjust it to your schedule and energy.",
-    },
-    {
-      tag: "Regular review",
-      title: "Review your response",
-      body: "Track weight, energy and soreness over time; this estimate assumes intake and activity stay broadly stable.",
-    },
-    {
-      tag: targetDate ? shortDate(targetDate) : projectionStatus === "maintenance" ? "Maintenance" : "No date estimated",
-      title: "Choose the next adjustment",
-      body: targetDate
-        ? "The date is a simplified scenario estimate, so reassess it when your real-world trend changes."
-        : "The model does not promise a target date here; review the target and choose adjustments with appropriate care.",
-      gold: true,
-    },
-  ];
-
-  return (
-    <div className="milestones">
-      <h2 className="section-title">Your road to results</h2>
-      <ol className="milestone-list">
-        {milestones.map((milestone, index) => (
-          <li className={`milestone ${milestone.gold ? "gold" : ""}`} key={index}>
-            <span className="milestone-node" aria-hidden="true" />
-            <div className="milestone-body">
-              <span className="milestone-tag">{milestone.tag}</span>
-              <strong>{milestone.title}</strong>
-              <p>{milestone.body}</p>
-            </div>
-          </li>
-        ))}
-      </ol>
+      <button className="plan-unlock-strip" type="button" disabled={busy} onClick={onUnlock}><LockIcon />Unlock all {preview.length} sections and your first-week template<ArrowIcon /></button>
     </div>
   );
 }
@@ -2153,7 +1927,7 @@ const faqItems = [
   },
   {
     q: "Is my plan really personalized?",
-    a: "Every plan is built from your answers — your goal, body metrics, activity level, schedule and the barrier you told us about. No two plans are identical.",
+    a: "Your answers guide the estimates and suggestions. Unanswered optional preferences use labeled defaults. People with similar answers may receive similar guidance.",
   },
   {
     q: "How are dates calculated?",
@@ -2214,7 +1988,7 @@ function PaywallCard({
       <h2>Get exact calories, the projection outcome and the full weekly plan.</h2>
       <p>
         {offer.headline} Everything you previewed above stays available to unlock in full,
-        including the day-by-day schedule, meal ideas and recovery guide.
+        including the first-week template, recommendation basis and review prompts.
       </p>
 
       <div className="price-tiers">
@@ -2479,19 +2253,9 @@ function planSubhead(
     return `The simplified scenario did not reach ${goal} within one year; review the target and reassess regularly.`;
   }
   if (targetDate) {
-    return `Under the simplified energy-balance scenario, you're on track to ${goal} by ${shortDate(targetDate)}.`;
+    return `Under the simplified energy-balance assumptions, the model would ${goal} by ${shortDate(targetDate)}.`;
   }
   return `The simplified scenario has no date estimate for ${goal}; review the target and reassess regularly.`;
-}
-
-function summaryLine(summary: {
-  pacePreference: PacePreference;
-  workoutDaysPerWeek: number;
-  sessionMinutes: number;
-  workoutLocation: WorkoutLocation;
-  dietPreference: DietPreference;
-}) {
-  return `${titleCase(summary.pacePreference)} pace · ${summary.workoutDaysPerWeek} days/week · ${summary.sessionMinutes} min · ${titleCase(summary.workoutLocation)} · ${titleCase(summary.dietPreference)} nutrition`;
 }
 
 function payloadForStep(step: number, form: FormState): AssessmentPayload {
