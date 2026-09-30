@@ -118,9 +118,12 @@ export async function PATCH(request: Request) {
 
       const currentAnswers = current ? mapAnswerRows(current.answers) : {};
       const coreChanged = Object.entries(updateData).some(([key, value]) => current?.[key as keyof typeof current] !== value);
-      const extendedChanged = Object.entries(extendedAnswers).some(([key, value]) => currentAnswers[key as keyof typeof currentAnswers] !== value);
+      const extendedChanged = Object.entries(extendedAnswers).some(([key, value]) => {
+        const answerKey = key as keyof typeof currentAnswers;
+        return value === null ? answerKey in currentAnswers : currentAnswers[answerKey] !== value;
+      });
       const consentChanged = healthDataConsent !== undefined && healthDataConsent !== user.healthDataConsent;
-      const hasAssessmentData = Object.keys(updateData).length > 0 || Object.keys(extendedAnswers).length > 0;
+      const hasAssessmentData = Object.keys(updateData).length > 0 || Object.values(extendedAnswers).some((value) => value !== null);
 
       if (consentChanged) {
         await tx.user.update({ where: { id: input.sessionId }, data: { healthDataConsent } });

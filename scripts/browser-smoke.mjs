@@ -72,17 +72,20 @@ try {
   await openRestoredFunnelAt("Which biological sex should we use for the estimate?");
 
   await page.getByRole("button", { name: /Female/ }).click();
+  let genderPayloadKeys;
   const genderSaveResponse = page.waitForResponse((response) =>
     new URL(response.url()).pathname === "/api/assessment" &&
     response.request().method() === "PATCH" &&
     response.request().postDataJSON()?.sessionId === firstSessionId &&
-    response.request().postDataJSON()?.data?.gender === "female"
+    response.request().postDataJSON()?.data?.gender === "female" &&
+    (genderPayloadKeys = Object.keys(response.request().postDataJSON().data))
   );
   const [savedGender] = await Promise.all([
     genderSaveResponse,
     page.getByRole("button", { name: "Continue" }).click(),
   ]);
   if (savedGender.status() !== 200) throw new Error(`gender save failed before reload: ${savedGender.status()}`);
+  if (JSON.stringify(genderPayloadKeys) !== JSON.stringify(["gender"])) throw new Error(`gender PATCH included unrelated fields: ${genderPayloadKeys}`);
   await page.getByRole("heading", { name: "How old are you?", exact: true }).waitFor();
   await page.reload({ waitUntil: "networkidle" });
   await openRestoredFunnelAt("How old are you?");
@@ -265,6 +268,71 @@ try {
   const afterCancel = await apiJson(page, `/api/assessment?sessionId=${firstSessionId}`);
   if (afterCancel.body.version !== beforeCancel.body.version || afterCancel.body.assessment?.gender !== beforeCancel.body.assessment?.gender) {
     throw new Error("cancel editing changed the saved report after a failed refresh");
+  }
+
+  await page.getByRole("button", { name: "Edit answers" }).click();
+  await page.getByRole("heading", { name: "Which biological sex" }).waitFor();
+  for (let step = 0; step < 8; step += 1) await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "How is your recovery baseline?" }).waitFor();
+  await page.getByLabel("Sleep").fill("");
+  await page.getByRole("button", { name: "Continue" }).click();
+  let clearPatchPosts = 0;
+  let droppedClearPatchBody;
+  await page.route("**/api/assessment**", async (route) => {
+    if (route.request().method() !== "PATCH") { await route.continue(); return; }
+    const requestData = route.request().postDataJSON()?.data;
+    const response = await route.fetch();
+    const body = await response.json();
+    if (requestData?.sleepHours === null) {
+      clearPatchPosts += 1;
+      droppedClearPatchBody = body;
+      if (clearPatchPosts === 1) { await route.abort("failed"); return; }
+    }
+    await route.fulfill({ response });
+  });
+  await page.getByRole("button", { name: "Save and update plan" }).click();
+  await page.getByText("Plan unlocked", { exact: true }).waitFor();
+  if (clearPatchPosts !== 1 || droppedClearPatchBody?.version !== beforeCancel.body.version + 1) {
+    throw new Error("dropped clear PATCH response did not reconcile the upstream deletion");
+  }
+  await page.unroute("**/api/assessment**");
+  const clearedAssessment = await apiJson(page, `/api/assessment?sessionId=${firstSessionId}`);
+  if (clearedAssessment.body.assessment?.sleepHours !== undefined) throw new Error("cleared sleep answer returned after editing");
+  const clearedReport = await apiJson(page, `/api/results?sessionId=${firstSessionId}`);
+  if (clearedReport.status !== 200 || clearedReport.body.needPaywall || clearedReport.body.result.plan.basis.find((entry) => entry.field === "sleepHours")?.source !== "default") {
+    throw new Error("paid report did not rebuild with the cleared sleep answer");
+  }
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByText("Plan unlocked", { exact: true }).waitFor();
+  const reloadedClearedReport = await apiJson(page, `/api/results?sessionId=${firstSessionId}`);
+  if (reloadedClearedReport.status !== 200 || reloadedClearedReport.body.result.plan.basis.find((entry) => entry.field === "sleepHours")?.source !== "default") {
+    throw new Error("cleared sleep answer was not restored after reload");
+  }
+
+  const normalClearSessionId = await prepareDraftSession(page, {
+    gender: "female", goal: "lose_weight", age: 32, heightCm: 165, weightKg: 72, targetWeightKg: 62,
+    sleepHours: 6.5,
+  });
+  await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), normalClearSessionId);
+  await page.reload({ waitUntil: "networkidle" });
+  await openRestoredFunnelAt("How active are you right now?");
+  await page.getByRole("button", { name: /Light/ }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "Design your weekly training rhythm." }).waitFor();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "Pick the eating style you can keep." }).waitFor();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "How is your recovery baseline?" }).waitFor();
+  await page.getByLabel("Sleep").fill("");
+  const normalClearRequest = page.waitForRequest((request) => {
+    if (!request.url().endsWith("/api/assessment") || request.method() !== "PATCH") return false;
+    const data = request.postDataJSON()?.data;
+    return data?.sleepHours === null;
+  });
+  await Promise.all([normalClearRequest, page.getByRole("button", { name: "Continue" }).click()]);
+  const normalClearData = (await normalClearRequest).postDataJSON().data;
+  if (JSON.stringify(Object.keys(normalClearData)) !== JSON.stringify(["sleepHours", "stressLevel"])) {
+    throw new Error(`normal recovery clear PATCH included unrelated fields: ${Object.keys(normalClearData)}`);
   }
 
   const partialSessionId = await prepareDraftSession(page, {

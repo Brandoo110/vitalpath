@@ -355,6 +355,190 @@ describe("assessment persistence API", () => {
     );
   });
 
+  it("accepts_null_for_an_optional_answer_to_clear_it", async () => {
+    const sessionId = await createSessionId();
+
+    const response = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 0,
+        data: { sleepHours: null },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ version: 0, step: 0 });
+    expect(await prisma.assessment.findUnique({ where: { userId: sessionId } })).toBeNull();
+  });
+
+  it("deletes_existing_optional_answers_once_and_omits_them_on_restore", async () => {
+    const sessionId = await createSessionId();
+
+    const initial = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 0,
+        data: { sleepHours: 6.5, stressLevel: "medium", weightKg: 72 },
+      }),
+    );
+    expect(initial.status).toBe(200);
+    expect((await initial.json()).version).toBe(1);
+
+    const cleared = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 1,
+        data: { sleepHours: null },
+      }),
+    );
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ version: 2, completed: false });
+
+    const restored = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+    );
+    const body = await restored.json();
+    expect(body.assessment).toMatchObject({ weightKg: 72, stressLevel: "medium" });
+    expect(body.assessment).not.toHaveProperty("sleepHours");
+
+    const assessment = await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(await prisma.assessmentAnswer.count({ where: { assessmentId: assessment.id } })).toBe(1);
+  });
+
+  it("preserves_an_optional_answer_when_the_field_is_omitted_and_supports_mixed_changes", async () => {
+    const sessionId = await createSessionId();
+
+    await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 0,
+        data: { sleepHours: 6.5, stressLevel: "medium", weightKg: 72 },
+      }),
+    );
+    const missingDelete = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 1,
+        data: { mainBarrier: null },
+      }),
+    );
+    expect(missingDelete.status).toBe(200);
+    expect((await missingDelete.json()).version).toBe(1);
+    const omitted = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 1,
+        data: { weightKg: 71 },
+      }),
+    );
+    expect(omitted.status).toBe(200);
+    expect((await omitted.json()).version).toBe(2);
+
+    const mixed = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 2,
+        data: { sleepHours: null, targetWeightKg: 64 },
+      }),
+    );
+    expect(mixed.status).toBe(200);
+    expect((await mixed.json()).version).toBe(3);
+
+    const restored = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+    );
+    expect((await restored.json()).assessment).toMatchObject({ weightKg: 71, targetWeightKg: 64, stressLevel: "medium" });
+    expect((await prisma.assessment.findUniqueOrThrow({ where: { userId: sessionId } })).version).toBe(3);
+  });
+
+  it("rejects_a_stale_optional_delete_without_removing_the_saved_answer", async () => {
+    const sessionId = await createSessionId();
+
+    await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 0,
+        data: { sleepHours: 6.5 },
+      }),
+    );
+    const current = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 1,
+        data: { stressLevel: "high" },
+      }),
+    );
+    expect(current.status).toBe(200);
+
+    const stale = await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 1,
+        data: { sleepHours: null },
+      }),
+    );
+    expect(stale.status).toBe(409);
+
+    const restored = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+    );
+    expect((await restored.json()).assessment).toMatchObject({ sleepHours: 6.5, stressLevel: "high" });
+  });
+
+  it("rolls_back_optional_delete_core_update_and_consent_when_a_later_answer_fails", async () => {
+    const sessionId = await createSessionId();
+    await patchAssessment(
+      jsonRequest("PATCH", "/api/assessment", {
+        sessionId,
+        step: 8,
+        version: 0,
+        data: { sleepHours: 6.5, weightKg: 72 },
+      }),
+    );
+    const question = await prisma.questionnaireQuestion.findUniqueOrThrow({
+      where: { key: "mainBarrier" },
+    });
+    await prisma.questionnaireQuestion.update({ where: { id: question.id }, data: { active: false } });
+
+    try {
+      const response = await patchAssessment(
+        jsonRequest("PATCH", "/api/assessment", {
+          sessionId,
+          step: 9,
+          version: 1,
+          data: {
+            sleepHours: null,
+            mainBarrier: "no_time",
+            weightKg: 71,
+            healthDataConsent: true,
+          },
+        }),
+      );
+      expect(response.status).toBe(500);
+
+      const restored = await getAssessment(
+        new Request(`http://localhost/api/assessment?sessionId=${sessionId}`),
+      );
+      const body = await restored.json();
+      expect(body.healthDataConsent).toBe(false);
+      expect(body.version).toBe(1);
+      expect(body.assessment).toMatchObject({ sleepHours: 6.5, weightKg: 72 });
+      expect(body.assessment).not.toHaveProperty("mainBarrier");
+    } finally {
+      await prisma.questionnaireQuestion.update({ where: { id: question.id }, data: { active: true } });
+    }
+  });
+
   it("rejects_stale_concurrent_patch", async () => {
     const sessionId = await createSessionId();
 

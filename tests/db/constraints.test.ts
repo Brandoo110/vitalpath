@@ -15,11 +15,13 @@ describe("database consistency constraints", () => {
   it("rejects_negative_assessment_versions", async () => {
     const user = await createUser();
 
-    await expect(
+    await expectConstraintFailure(
       prisma.assessment.create({
         data: { userId: user.id, version: -1 },
       }),
-    ).rejects.toThrow();
+      "23514",
+      "assessments_version_nonnegative_check",
+    );
   });
 
   it("requires_exactly_one_answer_value_column", async () => {
@@ -29,7 +31,7 @@ describe("database consistency constraints", () => {
       where: { key: "pacePreference" },
     });
 
-    await expect(
+    await expectConstraintFailure(
       prisma.assessmentAnswer.create({
         data: {
           assessmentId: assessment.id,
@@ -38,18 +40,22 @@ describe("database consistency constraints", () => {
           valueNumber: 1,
         },
       }),
-    ).rejects.toThrow();
+      "23514",
+      "assessment_answers_exactly_one_value_check",
+    );
   });
 
   it("requires_plan_and_paid_at_for_active_subscription", async () => {
     const user = await createUser();
 
-    await expect(
+    await expectConstraintFailure(
       prisma.subscription.update({
         where: { userId: user.id },
         data: { status: "active", plan: null, paidAt: null },
       }),
-    ).rejects.toThrow();
+      "23514",
+      "subscriptions_status_fields_check",
+    );
   });
 
   it("prevents_a_result_from_crossing_user_assessment_ownership", async () => {
@@ -57,7 +63,7 @@ describe("database consistency constraints", () => {
     const other = await createUser();
     const assessment = await prisma.assessment.create({ data: { userId: other.id } });
 
-    await expect(
+    await expectConstraintFailure(
       prisma.result.create({
         data: {
           userId: owner.id,
@@ -67,9 +73,32 @@ describe("database consistency constraints", () => {
           recommendedCalories: 1800,
         },
       }),
-    ).rejects.toThrow();
+      "23503",
+      "results_assessmentId_userId_fkey",
+    );
   });
 });
+
+async function expectConstraintFailure(
+  operation: Promise<unknown>,
+  postgresCode: string,
+  constraint: string,
+) {
+  try {
+    await operation;
+    throw new Error(`Expected PostgreSQL constraint ${constraint} to reject`);
+  } catch (error) {
+    const candidate = error as {
+      cause?: { originalCode?: string; originalMessage?: string };
+      meta?: { driverAdapterError?: { cause?: { originalCode?: string; originalMessage?: string } } };
+    };
+    const cause = candidate.meta?.driverAdapterError?.cause ?? candidate.cause;
+    expect(cause).toMatchObject({
+      originalCode: postgresCode,
+      originalMessage: expect.stringContaining(constraint),
+    });
+  }
+}
 
 async function createUser() {
   const user = await prisma.user.create({

@@ -94,15 +94,29 @@ erDiagram
 {
   "assessment": null,
   "version": 0,
-  "nextStep": 1,
-  "missingFields": ["gender", "goal", "age"],
+  "nextStep": 0,
+  "missingFields": [
+    "gender",
+    "age",
+    "heightCm",
+    "weightKg",
+    "targetWeightKg",
+    "goal",
+    "activityLevel",
+    "healthDataConsent",
+    "wellnessEligible"
+  ],
   "state": "empty"
 }
 ```
 
+`nextStep` 使用 0-based 步骤编号；新会话从第 `0` 步开始。扩展问卷的 8 个可选字段（`pacePreference`、`workoutDaysPerWeek`、`sessionMinutes`、`workoutLocation`、`dietPreference`、`sleepHours`、`stressLevel`、`mainBarrier`）遵循增量语义：省略字段表示保留已保存答案，显式发送 `null` 表示删除答案。删除会递增一次 `version`、使已生成报告变为 `stale`，删除不存在的答案是 no-op；核心健康字段仍拒绝 `null`。
+
 `step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。匿名 `sessionId` 是本挑战演示用的 bearer 身份，没有登录或生产级认证语义；服务端仍会拒绝格式错误或未知 session，调用方不得把它当作可公开分享的生产凭证。
 
 ### `PATCH /api/assessment`
+
+以下 fixture 以 `POST /api/sessions` 使用 `{}` 创建新 session、尚未设置 health data consent 为前提；实际调用请把 `…` 替换为该响应中的 `sessionId`。
 
 请求示例：
 
@@ -110,8 +124,15 @@ erDiagram
 {
   "sessionId": "…",
   "step": 2,
-  "version": 1,
-  "data": { "weightKg": 72, "targetWeightKg": 62 }
+  "version": 0,
+  "data": {
+    "gender": "female",
+    "goal": "lose_weight",
+    "age": 32,
+    "heightCm": 165,
+    "weightKg": 72,
+    "targetWeightKg": 62
+  }
 }
 ```
 
@@ -119,11 +140,11 @@ erDiagram
 
 ```json
 {
-  "version": 2,
+  "version": 1,
   "step": 2,
   "completed": false,
-  "nextStep": 3,
-  "missingFields": ["heightCm", "weightKg", "targetWeightKg"],
+  "nextStep": 5,
+  "missingFields": ["activityLevel", "healthDataConsent", "wellnessEligible"],
   "state": "draft"
 }
 ```
