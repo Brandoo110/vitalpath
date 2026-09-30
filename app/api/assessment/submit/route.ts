@@ -37,10 +37,12 @@ export async function POST(request: Request) {
 
       const assessment = user.assessment;
       if (!assessment) {
+        const progress = deriveAssessmentProgress(null, user.healthDataConsent, user.result);
         return {
           kind: "incomplete" as const,
           missingFields: [...requiredHealthFields],
           nextStep: 0,
+          issues: progress.missingFields.map((field) => ({ field, message: "This field is required" })),
         };
       }
       if (input.version !== assessment.version) {
@@ -57,27 +59,25 @@ export async function POST(request: Request) {
           kind: "incomplete" as const,
           missingFields,
           nextStep: progress.nextStep,
+          issues: progress.missingFields.map((field) => ({ field, message: "This field is required" })),
         };
       }
-      if (user.healthDataConsent !== true) {
+      const missingConfirmationFields = progress.missingFields.filter(
+        (field) => field === "healthDataConsent" || field === "wellnessEligible",
+      );
+      if (missingConfirmationFields.length > 0) {
+        const confirmationIssues = missingConfirmationFields.map((field) => ({
+          field,
+          message: field === "healthDataConsent"
+            ? "Health data consent is required before submitting"
+            : "Confirm this estimate applies to you before submitting",
+        }));
         throw unprocessable(
           "assessment_invalid",
-          "Health data consent is required before submitting",
+          confirmationIssues[0].message,
           {
-            field: "healthDataConsent",
-            issues: [{ field: "healthDataConsent", message: "Health data consent is required before submitting" }],
-            nextStep: 9,
-            nextAction: "continue_assessment",
-          },
-        );
-      }
-      if (assessment.wellnessEligible !== true) {
-        throw unprocessable(
-          "assessment_invalid",
-          "Confirm that this estimate is appropriate before submitting",
-          {
-            field: "wellnessEligible",
-            issues: [{ field: "wellnessEligible", message: "Confirm this estimate applies to you before submitting" }],
+            field: confirmationIssues[0].field,
+            issues: confirmationIssues,
             nextStep: 9,
             nextAction: "continue_assessment",
           },
@@ -110,7 +110,7 @@ export async function POST(request: Request) {
         const field = healthInputField(message);
         throw unprocessable("assessment_invalid", message, {
           issues: [{ field, message }],
-          nextStep: 9,
+          nextStep: healthInputStep(field),
           nextAction: "review_assessment",
         });
       }
@@ -156,7 +156,7 @@ export async function POST(request: Request) {
           error: "assessment_incomplete",
           message: "Assessment is missing required health fields",
           missingFields: result.missingFields,
-          issues: result.missingFields.map((field) => ({ field, message: "This field is required" })),
+          issues: result.issues,
           nextStep: result.nextStep,
           nextAction: "continue_assessment",
         },
@@ -200,5 +200,16 @@ function errorMessage(error: unknown) {
 
 function healthInputField(message: string) {
   const fields = ["age", "heightCm", "weightKg", "targetWeightKg", "goal", "activityLevel"];
-  return fields.find((field) => message.includes(field)) ?? "assessment";
+  const directField = fields.find((field) => message.includes(field));
+  if (directField) return directField;
+  if (/target BMI/i.test(message)) return "targetWeightKg";
+  return "assessment";
+}
+
+function healthInputStep(field: string) {
+  if (field === "age") return 1;
+  if (["heightCm", "weightKg", "targetWeightKg", "assessment"].includes(field)) return 2;
+  if (field === "goal") return 3;
+  if (field === "activityLevel") return 5;
+  return 9;
 }

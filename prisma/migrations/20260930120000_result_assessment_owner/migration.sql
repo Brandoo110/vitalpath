@@ -6,6 +6,9 @@ ALTER TABLE "assessments"
   ADD CONSTRAINT "assessments_id_userId_key" UNIQUE ("id", "userId");
 
 ALTER TABLE "results"
+  ADD CONSTRAINT "results_assessmentId_userId_key" UNIQUE ("assessmentId", "userId");
+
+ALTER TABLE "results"
   DROP CONSTRAINT "results_assessmentId_fkey";
 
 ALTER TABLE "results"

@@ -73,11 +73,11 @@ erDiagram
 
 ### `POST /api/assessment/submit`
 
-请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，不创建或覆盖结果。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
+请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`healthDataConsent` 与 `wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，响应带字段化 `issues`、`nextStep` 和 `nextAction`，不创建或覆盖结果；缺少核心字段时保留 `missingFields` 并返回相同结构化定位信息。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
 
 ### `GET /api/results?sessionId=…`
 
-响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改或算法版本过期时返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或 `calculationDetails`。会员响应由 `Subscription.status=active` 授权，并返回可空 `targetDate` 和完整 `calculationDetails`。
+响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改或算法版本过期时返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或 `calculationDetails`；两种权限均返回公共 `report` metadata，免费响应的 `lockedFields` 明确列出受保护字段，会员响应的 `lockedFields` 为空。会员响应由 `Subscription.status=active` 授权，并返回可空 `targetDate` 和完整 `calculationDetails`。
 
 ### `POST /api/pay`
 
@@ -106,6 +106,10 @@ Vitest 的 API 集成测试使用隔离 PostgreSQL，纯算法测试不依赖数
 ```sh
 npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/health-domain.test.ts
 ```
+
+## VP-06 需求映射
+
+四阶段后端完善保持 wellness-v2 数值公式不变：第一阶段补齐固定步骤的恢复状态、缺失字段和无变化 PATCH；第二阶段补显式健康数据同意、结构化提交问题和结果归属复合约束；第三阶段统一报告 metadata/lockedFields，并覆盖先支付、套餐隔离和提交响应丢失后的重放；第四阶段将默认 Vitest 固定为单 worker，`npm run verify` 串联 lint、测试和类型检查，CI 继续执行迁移、构建、HTTP 及浏览器失败清理。扩展问卷仍为可选项，真实支付、登录、临床模型和压力测试保持在范围外。
 
 ## AI 使用复盘
 

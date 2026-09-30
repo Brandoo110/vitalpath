@@ -58,7 +58,9 @@ export function deriveAssessmentProgress(
   if (!assessment) {
     return {
       nextStep: 0,
-      missingFields: [...requiredProgressFields],
+      missingFields: requiredProgressFields.filter(
+        (field) => field !== "healthDataConsent" || !healthDataConsent,
+      ),
       state: "empty",
     };
   }

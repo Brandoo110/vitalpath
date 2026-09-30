@@ -51,6 +51,21 @@ describe("assessment persistence API", () => {
     });
   });
 
+  it("does_not_list_confirmed_health_data_consent_as_missing_on_empty_progress", async () => {
+    const response = await createSession(
+      jsonRequest("POST", "/api/sessions", { healthDataConsent: true }),
+    );
+    const body = await response.json();
+    createdSessionIds.add(body.sessionId);
+
+    const progress = await getAssessment(
+      new Request(`http://localhost/api/assessment?sessionId=${body.sessionId}`),
+    );
+    const progressBody = await progress.json();
+    expect(progressBody.healthDataConsent).toBe(true);
+    expect(progressBody.missingFields).not.toContain("healthDataConsent");
+  });
+
   it("derives_next_step_and_missing_fields_from_saved_core_data", async () => {
     const sessionId = await createSessionId();
 

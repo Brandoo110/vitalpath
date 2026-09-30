@@ -49,11 +49,8 @@ jobs:
       - name: Verify migration upgrade and rollback
         run: npm run test:migration
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test -- --maxWorkers=1
+      - name: Verify lint, tests and types
+        run: npm run verify
 
       - name: Build
         run: npm run build
@@ -63,6 +60,9 @@ jobs:
 
       - name: Browser smoke
         run: npm run test:browser
+
+      - name: Browser smoke failure cleanup
+        run: npm run test:browser:failure-cleanup
 
       - name: HTTP smoke
         run: npm run test:http

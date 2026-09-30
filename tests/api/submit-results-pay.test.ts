@@ -70,6 +70,8 @@ describe("submit, results and pay API", () => {
       { field: "weightKg", message: "This field is required" },
       { field: "targetWeightKg", message: "This field is required" },
       { field: "activityLevel", message: "This field is required" },
+      { field: "healthDataConsent", message: "This field is required" },
+      { field: "wellnessEligible", message: "This field is required" },
     ]);
     expect(body.nextStep).toBe(1);
     expect(body.nextAction).toBe("continue_assessment");
@@ -122,6 +124,11 @@ describe("submit, results and pay API", () => {
 
     expect(rejected.status).toBe(422);
     expect(body.error).toBe("assessment_invalid");
+    expect(body.issues).toEqual([
+      expect.objectContaining({ field: "goal" }),
+    ]);
+    expect(body.nextStep).toBe(3);
+    expect(body.nextAction).toBe("review_assessment");
     const current = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
     expect(current.id).toBe(original.id);
     expect(current.sourceAssessmentVersion).toBe(1);
@@ -152,6 +159,31 @@ describe("submit, results and pay API", () => {
     expect(body.nextStep).toBe(9);
     expect(body.nextAction).toBe("continue_assessment");
     expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(0);
+  });
+
+  it("maps_a_current_bmi_algorithm_error_to_the_body_step", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const patchResponse = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 2,
+      version: 1,
+      data: { weightKg: 49.5 },
+    }));
+    expect(patchResponse.status).toBe(200);
+
+    const response = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 2 }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(422);
+    expect(body).toMatchObject({
+      error: "assessment_invalid",
+      issues: [{ field: "assessment" }],
+      nextStep: 2,
+      nextAction: "review_assessment",
+    });
   });
 
   it("requires_explicit_health_data_consent_at_submit", async () => {
