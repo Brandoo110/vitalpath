@@ -69,6 +69,17 @@ try {
   }
 
   dropProxy = await createDropResponseProxy(baseUrl);
+  const invalidProxyResponse = await fetch(dropProxy.url("/api/assessment"), json("PATCH", {
+    sessionId, step: -1, version: 0, data: {},
+  }));
+  const invalidProxyBody = await invalidProxyResponse.json();
+  if (invalidProxyResponse.status !== 400 || invalidProxyBody.error !== "bad_request") {
+    throw new Error("drop proxy did not propagate a deterministic non-2xx upstream response");
+  }
+  const invalidEvidence = dropProxy.lastUpstream();
+  if (invalidEvidence.status !== 400 || JSON.parse(invalidEvidence.body).error !== "bad_request") {
+    throw new Error("drop proxy did not retain the non-2xx upstream evidence");
+  }
   await expectDroppedRequest(dropProxy.url("/api/assessment"), json("PATCH", {
     sessionId, step: 1, version: 0,
     data: { gender: "female", goal: "lose_weight", age: 32 },
@@ -76,6 +87,10 @@ try {
   const first = await request(`/api/assessment?sessionId=${sessionId}`);
   if (first.version !== 1 || first.assessment?.gender !== "female" || first.assessment?.age !== 32) {
     throw new Error("dropped PATCH response did not leave the saved version and values readable");
+  }
+  const patchEvidence = dropProxy.lastUpstream();
+  if (patchEvidence.status !== 200 || JSON.parse(patchEvidence.body).version !== 1) {
+    throw new Error("drop proxy did not retain the successful PATCH response evidence");
   }
   const stalePatch = await fetch(`${baseUrl}/api/assessment`, json("PATCH", {
     sessionId, step: 2, version: 0,
@@ -102,32 +117,40 @@ try {
   if (restored.version !== second.version || restored.assessment?.age !== 32) {
     throw new Error("assessment recovery did not return the saved version and fields");
   }
-  const committedSubmit = await fetch(`${baseUrl}/api/assessment/submit`, json("POST", {
+  await expectDroppedRequest(dropProxy.url("/api/assessment/submit"), json("POST", {
     sessionId,
     version: second.version,
   }));
-  if (!committedSubmit.ok) {
-    throw new Error(`initial submit failed: ${committedSubmit.status}`);
+  const submitEvidence = dropProxy.lastUpstream();
+  if (submitEvidence.status !== 200 || !JSON.parse(submitEvidence.body).resultId) {
+    throw new Error("drop proxy did not retain the successful submit response evidence");
   }
-  // The upstream committed successfully, but the client discards the response body.
-  await committedSubmit.arrayBuffer();
   const replayedSubmit = await request("/api/assessment/submit", json("POST", {
     sessionId,
     version: second.version,
   }));
-  if (!replayedSubmit.resultId) throw new Error("submit replay did not recover the committed result");
+  if (!replayedSubmit.resultId || replayedSubmit.resultId !== JSON.parse(submitEvidence.body).resultId) {
+    throw new Error("submit replay did not recover the same committed result");
+  }
   const free = await request(`/api/results?sessionId=${sessionId}`);
   if (!free.needPaywall || "recommendedCalories" in free.result || "targetDate" in free.result || "plan" in free.result ||
       free.report?.algorithmVersion !== "wellness-v2" || !free.lockedFields?.includes("calculationDetails")) {
     throw new Error("free results leaked protected fields");
   }
   await expectDroppedRequest(dropProxy.url("/api/pay"), json("POST", { sessionId, plan: "monthly" }));
+  const payEvidence = dropProxy.lastUpstream();
+  const firstPay = JSON.parse(payEvidence.body);
+  if (payEvidence.status !== 200 || firstPay.subscriptionStatus !== "active" || firstPay.plan !== "monthly" || !firstPay.paidAt) {
+    throw new Error("drop proxy did not retain the successful pay response evidence");
+  }
   const replayedPay = await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
   const repeatedPay = await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
-  if (!replayedPay.paidAt || replayedPay.paidAt !== repeatedPay.paidAt) {
+  if (replayedPay.paidAt !== firstPay.paidAt || repeatedPay.paidAt !== firstPay.paidAt ||
+      replayedPay.plan !== firstPay.plan || repeatedPay.plan !== firstPay.plan ||
+      replayedPay.subscriptionStatus !== firstPay.subscriptionStatus || repeatedPay.subscriptionStatus !== firstPay.subscriptionStatus) {
     throw new Error("pay replay did not preserve paidAt");
   }
-  await assertSingleSubscription(sessionId, "monthly");
+  await assertSingleSubscription(sessionId, firstPay);
   const paid = await request(`/api/results?sessionId=${sessionId}`);
   if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.plan || !paid.result.calculationDetails ||
       paid.report?.algorithmVersion !== "wellness-v2" || paid.lockedFields?.length !== 0) {
@@ -150,6 +173,7 @@ try {
 }
 
 async function createDropResponseProxy(upstreamUrl) {
+  let lastUpstream;
   const proxy = http.createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -161,7 +185,14 @@ async function createDropResponseProxy(upstreamUrl) {
         body,
         duplex: "half",
       });
-      await upstream.arrayBuffer();
+      const upstreamBody = Buffer.from(await upstream.arrayBuffer());
+      lastUpstream = { status: upstream.status, body: upstreamBody.toString("utf8") };
+      if (!upstream.ok) {
+        response.statusCode = upstream.status;
+        response.setHeader("content-type", "application/json");
+        response.end(upstreamBody);
+        return;
+      }
       // The upstream has committed, then the client connection is destroyed.
       response.destroy();
     } catch (error) {
@@ -176,6 +207,10 @@ async function createDropResponseProxy(upstreamUrl) {
   const port = typeof address === "object" && address ? address.port : 0;
   return {
     url: (pathname) => `http://127.0.0.1:${port}${pathname}`,
+    lastUpstream: () => {
+      if (!lastUpstream) throw new Error("drop proxy has no upstream response evidence");
+      return lastUpstream;
+    },
     close: () => new Promise((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve())),
   };
 }
@@ -189,12 +224,12 @@ async function expectDroppedRequest(url, options) {
   throw new Error(`expected the dropped response from ${url}`);
 }
 
-async function assertSingleSubscription(userId, plan) {
+async function assertSingleSubscription(userId, expected) {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
     const result = await client.query('SELECT "status", "plan", "paidAt" FROM "subscriptions" WHERE "userId" = $1', [userId]);
-    if (result.rowCount !== 1 || result.rows[0].status !== "active" || result.rows[0].plan !== plan || !result.rows[0].paidAt) {
+    if (result.rowCount !== 1 || result.rows[0].status !== expected.subscriptionStatus || result.rows[0].plan !== expected.plan || !result.rows[0].paidAt) {
       throw new Error(`pay replay did not leave one stable subscription: rows=${result.rowCount}`);
     }
   } finally {

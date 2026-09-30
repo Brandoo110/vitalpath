@@ -88,8 +88,9 @@ async function verifyRetained(database) {
     const retained = await client.query(`
       SELECT u."id", a."age", a."version", a."wellnessEligible", aa."valueText", r."assessmentId", r."sourceAssessmentVersion", r."recommendedCalories", r."targetDate", r."calculationDetails", r."algorithmVersion", s."status", s."plan",
              (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'subscriptionStatus') AS "oldStatusColumn",
-             (SELECT 1 FROM pg_constraint WHERE conname = 'assessments_id_userId_key') AS "assessmentOwnerKey",
-             (SELECT 1 FROM pg_constraint WHERE conname = 'results_assessmentId_userId_key') AS "resultOwnerKey"
+             (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'assessments_id_userId_key') AS "assessmentOwnerDefinition",
+             (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'results_assessmentId_userId_key') AS "resultOwnerDefinition",
+             (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'results_assessmentId_userId_fkey') AS "resultOwnerForeignKey"
       FROM "users" u
       JOIN "assessments" a ON a."userId" = u."id"
       JOIN "assessment_answers" aa ON aa."assessmentId" = a."id"
@@ -98,7 +99,7 @@ async function verifyRetained(database) {
       WHERE u."id" = '00000000-0000-4000-8000-000000000001'
     `);
     const row = retained.rows[0];
-    if (!row || row.age !== 32 || row.version !== 3 || row.wellnessEligible !== null || row.valueText !== "standard" || !row.assessmentId || row.sourceAssessmentVersion !== null || row.recommendedCalories !== 1467 || row.targetDate === null || row.calculationDetails !== null || row.algorithmVersion !== "v1" || row.status !== "free" || row.plan !== null || row.oldStatusColumn !== null || row.assessmentOwnerKey !== 1 || row.resultOwnerKey !== 1) {
+    if (!row || row.age !== 32 || row.version !== 3 || row.wellnessEligible !== null || row.valueText !== "standard" || !row.assessmentId || row.sourceAssessmentVersion !== null || row.recommendedCalories !== 1467 || row.targetDate === null || row.calculationDetails !== null || row.algorithmVersion !== "v1" || row.status !== "free" || row.plan !== null || row.oldStatusColumn !== null || row.assessmentOwnerDefinition !== 'UNIQUE (id, "userId")' || row.resultOwnerDefinition !== 'UNIQUE ("assessmentId", "userId")' || row.resultOwnerForeignKey !== 'FOREIGN KEY ("assessmentId", "userId") REFERENCES assessments(id, "userId") ON UPDATE CASCADE ON DELETE CASCADE') {
       throw new Error("legal historical data was not retained with unknown v2 eligibility and calculation semantics");
     }
     await client.query(`UPDATE "results" SET "targetDate" = NULL, "calculationDetails" = '{"projectionStatus":"maintenance"}' WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
@@ -140,9 +141,12 @@ async function verifyOwnershipRollback(database) {
       ) AS "ownerConstraint",
       EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'results_assessmentId_userId_key'
-      ) AS "resultOwnerKey"
+      ) AS "resultOwnerKey",
+      EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'results_assessmentId_userId_fkey'
+      ) AS "ownerForeignKey"
     `);
-    if (constraint.rows[0].ownerConstraint || constraint.rows[0].resultOwnerKey) {
+    if (constraint.rows[0].ownerConstraint || constraint.rows[0].resultOwnerKey || constraint.rows[0].ownerForeignKey) {
       throw new Error("cross-user ownership migration left a partial constraint");
     }
   });

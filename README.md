@@ -22,11 +22,10 @@ npm run build
 npm run test:migration
 npm run test:http
 npm run test:http:failure-cleanup
-npm run test:browser
-npm run test:browser:failure-cleanup
+npm run verify:all
 ```
 
-开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`test:browser` 使用单 worker Chromium；优先使用本机已有 Chrome，否则先运行 `npx playwright install chromium`。它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`verify:all` 是 CI 使用的单一完整入口，要求隔离 PostgreSQL 已初始化、Prisma client 已生成，并在浏览器两项前先安装 Chromium（`npx playwright install chromium` 或 CI 的 `--with-deps`）。`test:browser` 使用单 worker Chromium；它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。当前后端隔离 worktree 尚未执行浏览器 smoke，等待父级完成前端接线后再运行；这不构成浏览器通过证据。不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -54,7 +53,19 @@ erDiagram
 
 ### `GET /api/assessment?sessionId=…`
 
-返回保存的核心字段、扩展答案、`step`、`completed` 和当前 `version`。`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。没有测评时返回 `assessment: null, version: 0`。
+响应带 `Cache-Control: private, no-store`，返回保存的核心字段、扩展答案、`step`、`completed`、当前 `version`，以及恢复状态：`nextStep`、`missingFields` 和 `state`（`empty`、`draft`、`completed` 或 `stale`）。没有测评时的形状是：
+
+```json
+{
+  "assessment": null,
+  "version": 0,
+  "nextStep": 1,
+  "missingFields": ["gender", "goal", "age"],
+  "state": "empty"
+}
+```
+
+`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。匿名 `sessionId` 是本地演示用的 bearer 身份，没有登录或生产级认证语义；服务端仍会拒绝格式错误或未知 session，调用方不得把它当作可公开分享的生产凭证。
 
 ### `PATCH /api/assessment`
 
@@ -69,11 +80,24 @@ erDiagram
 }
 ```
 
-成功响应包含递增后的 `version`。同一测评行在事务中锁定；旧版本返回 `409 version_conflict`。所有核心字段、扩展答案、同意状态和 `completed=false` 同事务写入。
+成功响应包含递增后的 `version`、`nextStep`、`missingFields`、`state`、`step` 和 `completed`。例如：
+
+```json
+{
+  "version": 2,
+  "step": 2,
+  "completed": false,
+  "nextStep": 3,
+  "missingFields": ["heightCm", "weightKg", "targetWeightKg"],
+  "state": "draft"
+}
+```
+
+同一测评行在事务中锁定；旧版本返回 `409 version_conflict`，不会覆盖新值。相同语义字段的 no-op 保存保持 `version`、结果和 `completed` 不变；只提高 `step` 的 step-only 保存只推进恢复游标，不使报告过期；核心字段、扩展答案或同意状态真实变化会递增 `version`、把 `completed` 置为 `false` 并使旧报告进入 `stale`。所有写入在同一事务中完成。提交和 PATCH 都必须使用服务端最近一次返回的 version，旧 version 没有绕过方式。
 
 ### `POST /api/assessment/submit`
 
-请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`healthDataConsent` 与 `wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，响应带字段化 `issues`、`nextStep` 和 `nextAction`，不创建或覆盖结果；缺少核心字段时保留 `missingFields` 并返回相同结构化定位信息。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
+请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`healthDataConsent` 与 `wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，响应带字段化 `issues`、`nextStep` 和 `nextAction`，不创建或覆盖结果；缺少核心字段时保留 `missingFields` 并返回相同结构化定位信息。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。首次支付可以先于 submit，但只有 submit 成功后结果接口才有可读取报告；支付不会绕过 consent、支持域或算法校验。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
 
 ### `GET /api/results?sessionId=…`
 
@@ -107,9 +131,18 @@ Vitest 的 API 集成测试使用隔离 PostgreSQL，纯算法测试不依赖数
 npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/health-domain.test.ts
 ```
 
-## VP-06 需求映射
+## 需求映射与行为边界
 
-四阶段后端完善保持 wellness-v2 数值公式不变：第一阶段补齐固定步骤的恢复状态、缺失字段和无变化 PATCH；第二阶段补显式健康数据同意、结构化提交问题和结果归属复合约束；第三阶段统一报告 metadata/lockedFields，并覆盖先支付、套餐隔离和提交响应丢失后的重放；第四阶段将默认 Vitest 固定为单 worker，`npm run verify` 串联 lint、测试和类型检查，CI 继续执行迁移、构建、HTTP 及浏览器失败清理。扩展问卷仍为可选项，真实支付、登录、临床模型和压力测试保持在范围外。
+四阶段后端完善保持 wellness-v2 数值公式不变。实现与边界如下：
+
+| 阶段需求 | 主要风险 | 对应文件/命令 | 未覆盖原因 |
+| --- | --- | --- | --- |
+| 保存/恢复、no-op、step-only、真实变化 | 旧 version 覆盖新草稿，恢复状态误导提交 | `lib/assessment-progress.ts`、`app/api/assessment/route.ts`、`npm run verify` | 当前 worktree 未接入最终前端，浏览器恢复流程待父级接线后验证 |
+| consent、结构化问题、结果归属和迁移保留 | 未确认数据进入算法，跨用户结果被读取，迁移半写 | submit/errors 路由、`prisma/schema.prisma`、`prisma/migrations/`、`npm run test:migration` | 未连接生产数据库，也未执行部署回滚或线上迁移 |
+| 报告脱敏、先支付、套餐冲突和响应丢失重放 | 免费泄露精确字段，支付重放改变 paidAt，支付后读失败丢状态 | results/pay 路由、`scripts/http-smoke.mjs`、`npm run test:http`、`npm run test:http:failure-cleanup` | 没有真实支付 provider、webhook 或登录身份 |
+| 单 worker 验证、CI 和真实浏览器清理 | 本地与 CI 命令漂移，失败遗留浏览器/服务进程 | `package.json`、`.github/workflows/ci.yml`、`scripts/browser-smoke*.mjs`、`npm run verify:all` | 本轮后端 worktree 等待父级前端集成，浏览器命令暂未声称通过 |
+
+扩展问卷仍为可选项；真实登录、支付、临床模型、压力/长稳和线上部署保持在范围外。
 
 ## AI 使用复盘
 
