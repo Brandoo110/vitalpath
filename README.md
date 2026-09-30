@@ -2,11 +2,51 @@
 
 [![CI](https://github.com/Brandoo110/vitalpath/actions/workflows/ci.yml/badge.svg)](https://github.com/Brandoo110/vitalpath/actions/workflows/ci.yml)
 
-VitalPath 是一个匿名健康测评 funnel：分步保存与恢复、服务端 `wellness-v2` 健康计算、结果版本一致性、模拟订阅和免费/会员字段权限。仓库为独立 Git 项目，当前只完成本地代码与验证，尚未部署。
+VitalPath 是一个匿名健康测评 funnel：分步保存与恢复、服务端 `wellness-v2` 健康计算、结果版本一致性、模拟订阅和免费/会员字段权限。仓库为独立 Git 项目，已部署到 Vercel，数据保存在独立 Supabase PostgreSQL 项目中。
 
 - GitHub：<https://github.com/Brandoo110/vitalpath>
-- 线上 URL：待部署；不存在可引用的线上 session。
+- 线上 URL：[https://vitalpath-pi.vercel.app](https://vitalpath-pi.vercel.app)
+- 部署与密码轮换：[DEPLOYMENT.md](DEPLOYMENT.md)。
 - 技术栈：Next.js 16.2.9 App Router、TypeScript、Prisma 7.8、PostgreSQL、Zod 4、Vitest 4。
+
+## 线上演示与验收
+
+打开 [VitalPath](https://vitalpath-pi.vercel.app) 即可从头填写测评。支付按钮只模拟订阅状态变化，不收取真实费用。
+
+以下 session 均是专门创建的合成数据，已于 2026-09-30 验证：
+
+| 状态 | sessionId |
+| --- | --- |
+| 已支付（monthly） | `85034c26-e5c6-4a31-9ef5-95cbe2fc34ff` |
+| 免费对照 | `ecf3b023-b5ff-4f5b-b7af-99f8a9287d2b` |
+
+无需登录即可通过结果 API 对照两种返回：
+
+```sh
+BASE_URL=https://vitalpath-pi.vercel.app
+
+# 免费：只有 BMI、热量区间、建议预览
+curl -sS "$BASE_URL/api/results?sessionId=ecf3b023-b5ff-4f5b-b7af-99f8a9287d2b"
+
+# 已支付：精确摄入量、目标日期、计算明细和完整计划
+curl -sS "$BASE_URL/api/results?sessionId=85034c26-e5c6-4a31-9ef5-95cbe2fc34ff"
+
+# 重放同一模拟支付；保持首次 paidAt，不重复创建订阅
+curl -sS -X POST "$BASE_URL/api/pay" \
+  -H 'content-type: application/json' \
+  -d '{"sessionId":"85034c26-e5c6-4a31-9ef5-95cbe2fc34ff","plan":"monthly"}'
+```
+
+如需观察免费 → 已支付的变化，从首页创建自己的演示 session，或将上面支付请求的 sessionId 改为免费对照 ID，再读取结果。公开示例可被任何访问者解锁或修改，因此不能保证免费对照永远保持免费；请勿填入真实个人资料。
+
+本次验收：
+
+- [PR #5 CI](https://github.com/Brandoo110/vitalpath/actions/runs/36688157900)和[对应 main CI](https://github.com/Brandoo110/vitalpath/actions/runs/36688664146)通过：106 测试 / 12 文件、lint、类型、build、隔离迁移、HTTP/浏览器与失败清理。
+- 新 Supabase 实际应用全部 10 个迁移，读回 7 张表（含迁移记录表）RLS 开启、8 条问卷定义；Data API 关闭。
+- 公网 API 验证分步恢复、非法数值拒绝、旧版本冲突、重复提交、免费字段保护、支付解锁及 paidAt 重放稳定；随后通过数据库读回确认报告来源版本和订阅状态一致。
+- 真实 Chrome 完成 10 步填写、中途刷新继续、可选步骤跳过、免费报告、模拟支付、七天计划展开，以及刷新后的会员报告恢复。
+
+这是挑战演示环境。上述证据说明当前流程可用，不代表临床有效性、压力容量或持续生产运行已经验证。
 
 ## 本地运行
 
@@ -20,7 +60,7 @@ npx playwright install chromium
 npm run verify:all
 ```
 
-开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`verify:all` 是 CI 使用的单一完整入口，要求隔离 PostgreSQL 已初始化、Prisma client 已生成，并在浏览器两项前先安装 Chromium（`npx playwright install chromium` 或 CI 的 `--with-deps`）。`test:browser` 使用单 worker Chromium；它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护、编辑取消、丢响应重放、可选步骤跳过、422 修正和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。当前候选已在本机隔离数据库上运行这两项浏览器命令；不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。文档中的 cURL 使用 `BASE_URL` 前缀，本地为 `http://localhost:3000`，公网为 `https://vitalpath-pi.vercel.app`。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`verify:all` 是 CI 使用的单一完整入口，要求隔离 PostgreSQL 已初始化、Prisma client 已生成，并在浏览器两项前先安装 Chromium（`npx playwright install chromium` 或 CI 的 `--with-deps`）。`test:browser` 使用单 worker Chromium；它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护、编辑取消、丢响应重放、可选步骤跳过、422 修正和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。当前候选已在本机隔离数据库上运行这两项浏览器命令；不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -60,7 +100,7 @@ erDiagram
 }
 ```
 
-`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。匿名 `sessionId` 是本地演示用的 bearer 身份，没有登录或生产级认证语义；服务端仍会拒绝格式错误或未知 session，调用方不得把它当作可公开分享的生产凭证。
+`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。匿名 `sessionId` 是本挑战演示用的 bearer 身份，没有登录或生产级认证语义；服务端仍会拒绝格式错误或未知 session，调用方不得把它当作可公开分享的生产凭证。
 
 ### `PATCH /api/assessment`
 
@@ -129,7 +169,7 @@ curl -X POST "$BASE_URL/api/pay" \
 
 Vitest 的 API 集成测试使用隔离 PostgreSQL，纯算法测试不依赖数据库；全量验证结果见 CI。测试重点覆盖 Mifflin/支持域、BMI 原始边界、目标方向、适用性确认、热量门槛、365 天投影、等重塑形、分步保存/恢复、乱序 step、真实数据库锁屏障下的首次创建/submit 与 PATCH/submit 顺序、同版本重复 submit 稳定性、修改后的 stale 结果、错误列/错误枚举/题目定义漂移、免费字段保护、支付重放与套餐冲突、事务回滚和数据库约束。`npm run test:migration` 会在同一专属 PostgreSQL 实例创建临时库，验证最新迁移保留旧用户/测评/答案/结果/订阅、历史 `wellnessEligible=NULL` 与 v1 来源语义、v2 可空结果列，以及订阅冲突、孤立结果、非法数值、完成态缺字段、多值答案的失败回滚。`npm run test:http` 只在本次 Next 子进程输出 Ready 后发请求，并覆盖创建→增量保存→恢复→submit→免费结果→pay→完整结果；`npm run test:http:failure-cleanup` 还验证异常退出后的本次进程组、端口和 session 清理，以及端口占用时不向 dummy 服务发业务请求。`npm run test:browser` 是单 worker 真浏览器回归，不用 mock handler 代替 UI 证据。
 
-未覆盖真实登录、真实支付 webhook、生产数据库迁移、压力/长稳、线上部署和临床有效性；这些超出本次模拟挑战授权与范围。
+未覆盖真实登录、真实支付 webhook、压力/长稳、持续生产运维和临床有效性；这些超出本次模拟挑战范围。新 Supabase 空库的实际迁移和公网流程已单独验收，见下方交付记录。
 
 算法 focused 回归还运行 3,240 个 wellness-v2 产品域组合，并用测试专用的闭式数学 oracle 对 REE、TDEE、热量策略、投影日和 365 天截断做交叉校验；同时覆盖数值/BMI 边界、无效枚举、适用性确认、目标方向和 UTC 日期边界。它使用代表性离散样本，不替代连续域穷举或临床验证。运行方式：
 
@@ -158,9 +198,9 @@ npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/heal
 | 四：完整浏览器流程 | 用真实Next/PostgreSQL验证用户填写、刷新、冲突、权威 nextStep、丢响应重放、支付后报告读取、编辑取消、可选步骤跳过和 422 修正 | `scripts/browser-smoke.mjs`；`npm run test:browser`、`npm run test:browser:failure-cleanup` |
 | 四：自动化运行与失败清理 | 单worker避免共享数据库测试互扰；失败必须返回非零，并清理本次session/服务/浏览器 | `npm test`；`npm run verify`（lint、测试、类型）；`npm run verify:all`（另含迁移、build、HTTP/browser及各自failure-cleanup）；CI复用完整入口 |
 
-边界与未覆盖原因：测试使用小规模隔离数据库，覆盖本题状态与异常，不做压力/长稳和所有浏览器设备矩阵；真实身份、支付provider/webhook未实现，因此没有对应集成测试。算法验证针对明确的产品输入域，不能证明临床效果。公网演示是原题必交付物，目前尚未部署，其URL、已付费演示session和线上验证仍待补齐。数据库约束的精确SQL定义及迁移回滚已有测试，不把Prisma generate/validate称为生产迁移或完整schema drift证明。
+边界与未覆盖原因：测试使用小规模隔离数据库，覆盖本题状态与异常，不做压力/长稳和所有浏览器设备矩阵；真实身份、支付provider/webhook未实现，因此没有对应集成测试。算法验证针对明确的产品输入域，不能证明临床效果。公网演示已部署并用合成数据验收；公开演示 session 仅用于对比，不应保存真实健康或联系资料。数据库约束的精确SQL定义及迁移回滚已有测试，不把Prisma generate/validate称为生产迁移或完整schema drift证明。
 
-扩展问卷仍为可选项；真实登录、支付、临床模型、压力/长稳和线上部署保持在范围外。
+扩展问卷仍为可选项；真实登录、真实支付、临床模型、压力/长稳保持在范围外。
 
 ## AI 使用复盘
 

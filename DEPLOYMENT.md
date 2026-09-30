@@ -7,11 +7,11 @@
 1. 创建独立 Supabase 项目，区域选东京 `ap-northeast-1`；关闭 Data API 与新表自动暴露，开启 automatic RLS。不要复用旧项目或旧 session。
 2. 在 Connect 对话框复制实际连接字符串。Vercel 使用 transaction pooler（6543）；本地迁移使用 session pooler（5432），避免依赖本机 IPv6。不要根据区域自行拼接 pooler 主机名。
 3. 从 Database → Settings → SSL configuration 下载根证书。数据库密码用 URL percent encoding，绝不提交到仓库。
-4. 把迁移连接保存在本机 `.env.production.local`（已忽略），`DIRECT_URL` 设置 `sslmode=verify-full` 和指向下载证书的绝对 `sslrootcert` 路径。此文件只服务部署，不能拿来运行测试。
+4. 把迁移连接保存在本机 `.env.deploy.local`（已忽略），`DIRECT_URL` 设置 `sslmode=verify-full` 和指向下载证书的绝对 `sslrootcert` 路径。此文件只服务部署，Next.js 不会自动加载这个文件名；不能拿来运行测试。
 5. 确认目标是新项目且 public 下没有现有业务数据后，加载该文件运行迁移：
 
 ```sh
-DOTENV_CONFIG_PATH=.env.production.local node -r dotenv/config node_modules/prisma/build/index.js migrate deploy
+DOTENV_CONFIG_PATH=.env.deploy.local node -r dotenv/config node_modules/prisma/build/index.js migrate deploy
 ```
 
 迁移是独立步骤；不要加入 Vercel build command，不要对线上库执行 `migrate reset`、`migrate dev`、`db push` 或本地/CI测试套件。验证 `_prisma_migrations` 全部成功、业务表 RLS 开启且问卷 seed 存在。
