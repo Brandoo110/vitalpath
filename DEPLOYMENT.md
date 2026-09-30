@@ -24,7 +24,7 @@ DOTENV_CONFIG_PATH=.env.production.local node -r dotenv/config node_modules/pris
 
 | 变量 | 内容 |
 | --- | --- |
-| `DATABASE_URL` | 新项目 transaction pooler 连接字符串；包含用户名与密码，不带 `sslmode`、`sslrootcert`、`sslcert`、`sslkey` |
+| `DATABASE_URL` | 新项目 transaction pooler 连接字符串；包含用户名与密码，不带 `ssl`、`sslmode`、`sslrootcert`、`sslcert`、`sslkey`、`sslnegotiation` |
 | `DATABASE_SSL_CA` | 控制台下载的根证书完整 PEM，多行原文 |
 
 证书是公开信任材料；应用显式开启证书校验。上述 URI SSL 参数不能与 CA 变量混配，否则应用拒绝启动，防止驱动覆盖传入的验证配置。`DIRECT_URL` 仅用于本地迁移，无需授予 Vercel 迁移凭据。不得使用 `NEXT_PUBLIC_` 前缀暴露连接信息，不要将正式演示库连接自动授权给 Preview。

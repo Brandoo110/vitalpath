@@ -18,6 +18,15 @@ vi.mock("@/app/generated/prisma/client", () => ({ PrismaClient: mocks.PrismaClie
 
 const databaseUrl = "postgresql://demo-user:demo-password@example.test:6543/vitalpath?schema=public";
 const ca = "-----BEGIN CERTIFICATE-----\nexample-ca\n-----END CERTIFICATE-----\n";
+const mixedSslUrlCases = [
+  ["sslmode", "verify-full"],
+  ["sslrootcert", "/tmp/supabase-root-ca.pem"],
+  ["sslcert", "/tmp/client-cert.pem"],
+  ["sslkey", "/tmp/client-key.pem"],
+  ["ssl", "0"],
+  ["ssl", "no-verify"],
+  ["sslnegotiation", "direct"],
+] as const;
 
 async function importPrismaModule() {
   vi.resetModules();
@@ -66,11 +75,11 @@ describe("Prisma PostgreSQL connection configuration", () => {
     ]);
   });
 
-  it.each(["sslmode", "sslrootcert", "sslcert", "sslkey"])(
+  it.each(mixedSslUrlCases)(
     "rejects DATABASE_SSL_CA mixed with the %s URL parameter",
-    async (parameter) => {
+    async (parameter, value) => {
       vi.stubEnv("DATABASE_SSL_CA", ca);
-      vi.stubEnv("DATABASE_URL", `${databaseUrl}&${parameter}=verify-full&token=super-secret`);
+      vi.stubEnv("DATABASE_URL", `${databaseUrl}&${parameter}=${encodeURIComponent(value)}&token=super-secret`);
 
       let thrown: unknown;
       try {

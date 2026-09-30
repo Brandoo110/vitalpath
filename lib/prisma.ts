@@ -4,7 +4,14 @@ import { PrismaPg } from "@prisma/adapter-pg";
 
 import { PrismaClient } from "@/app/generated/prisma/client";
 
-const SSL_URL_PARAMETERS = ["sslmode", "sslrootcert", "sslcert", "sslkey"] as const;
+const SSL_URL_PARAMETERS = [
+  "sslmode",
+  "sslrootcert",
+  "sslcert",
+  "sslkey",
+  "ssl",
+  "sslnegotiation",
+] as const;
 
 function getDatabaseUrl() {
   // Prisma 7 运行时通过 driver adapter 读 DATABASE_URL；迁移走 prisma.config.ts 的 DIRECT_URL。
