@@ -52,7 +52,7 @@
 .question-response { padding-top: 18px; min-width: 0; }
 .editorial-funnel .option-group { gap: 0; }
 .editorial-funnel .option-group > label { font-size: 11px; color: var(--muted); font-weight: 450; margin-bottom: 15px; }
-.editorial-funnel .option-card { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 24px 12px; min-height: 88px; gap: 20px; transition: background 180ms ease; }
+.editorial-funnel .option-card { border: 0; border-bottom: 1px solid var(--line); border-radius: 12px; background: transparent; padding: 24px 12px; min-height: 88px; gap: 20px; transition: background 180ms ease; }
 .editorial-funnel .option-card:hover:not(:disabled) { background: #eef1e8; transform: none; }
 .editorial-funnel .option-card.selected { background: #e7edde; border-bottom: 1px solid #9aac96; box-shadow: none; }
 .editorial-funnel .option-copy strong { font-size: 17px; font-weight: 500; }
