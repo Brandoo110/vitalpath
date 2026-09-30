@@ -442,15 +442,7 @@ async function waitForRestoredLandingReady() {
 async function openRestoredFunnelAt(headingName) {
   await waitForRestoredLandingReady();
   await page.getByRole("button", { name: "Start", exact: true }).click();
-  const heading = page.getByRole("heading", { name: headingName });
-  try {
-    await heading.waitFor({ timeout: 3_000 });
-  } catch {
-    await page.reload({ waitUntil: "networkidle" });
-    await waitForRestoredLandingReady();
-    await page.getByRole("button", { name: "Start", exact: true }).click();
-    await heading.waitFor();
-  }
+  await page.getByRole("heading", { name: headingName }).waitFor();
 }
 
 async function databaseQuery(text, values = []) {
