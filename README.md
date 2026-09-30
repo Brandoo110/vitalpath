@@ -20,7 +20,7 @@ npx playwright install chromium
 npm run verify:all
 ```
 
-开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`verify:all` 是 CI 使用的单一完整入口，要求隔离 PostgreSQL 已初始化、Prisma client 已生成，并在浏览器两项前先安装 Chromium（`npx playwright install chromium` 或 CI 的 `--with-deps`）。`test:browser` 使用单 worker Chromium；它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。当前后端隔离 worktree 尚未执行浏览器 smoke，等待父级完成前端接线后再运行；这不构成浏览器通过证据。不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`verify:all` 是 CI 使用的单一完整入口，要求隔离 PostgreSQL 已初始化、Prisma client 已生成，并在浏览器两项前先安装 Chromium（`npx playwright install chromium` 或 CI 的 `--with-deps`）。`test:browser` 使用单 worker Chromium；它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护、编辑取消、丢响应重放、可选步骤跳过、422 修正和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。当前候选已在本机隔离数据库上运行这两项浏览器命令；不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -142,7 +142,7 @@ npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/heal
 | 三：会员完整结果 | 支付前后为同一报告，新增精确热量、日期、计算明细和计划；过期报告不能绕过校验 | `tests/api/submit-results-pay.test.ts`：unlock、stale；`scripts/http-smoke.mjs` |
 | 三：模拟 /pay 闭环 | 相同套餐保留首次paidAt；不同套餐冲突；并发支付只有一个胜者；允许提前支付 | `tests/api/submit-results-pay.test.ts`：idempotent pay、plan conflict、competing payments、pay before submit |
 | 四：已提交但响应丢失 | 真HTTP代理在上游成功后断开客户端，读回PATCH，并核对submit的resultId及pay首次paidAt与数据库一致；非2xx不能假绿 | `scripts/http-smoke.mjs`；`npm run test:http` |
-| 四：完整浏览器流程 | 用真实Next/PostgreSQL验证用户填写、刷新、冲突、支付及报告读取失败后的操作 | `scripts/browser-smoke.mjs`；`npm run test:browser`（本轮集成证据待最终前端接线） |
+| 四：完整浏览器流程 | 用真实Next/PostgreSQL验证用户填写、刷新、冲突、权威 nextStep、丢响应重放、支付后报告读取、编辑取消、可选步骤跳过和 422 修正 | `scripts/browser-smoke.mjs`；`npm run test:browser`、`npm run test:browser:failure-cleanup` |
 | 四：自动化运行与失败清理 | 单worker避免共享数据库测试互扰；失败必须返回非零，并清理本次session/服务/浏览器 | `npm test`；`npm run verify`（lint、测试、类型）；`npm run verify:all`（另含迁移、build、HTTP/browser及各自failure-cleanup）；CI复用完整入口 |
 
 边界与未覆盖原因：测试使用小规模隔离数据库，覆盖本题状态与异常，不做压力/长稳和所有浏览器设备矩阵；真实身份、支付provider/webhook未实现，因此没有对应集成测试。算法验证针对明确的产品输入域，不能证明临床效果。公网演示是原题必交付物，目前尚未部署，其URL、已付费演示session和线上验证仍待补齐。数据库约束的精确SQL定义及迁移回滚已有测试，不把Prisma generate/validate称为生产迁移或完整schema drift证明。

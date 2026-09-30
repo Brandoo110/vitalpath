@@ -1,9 +1,12 @@
 import { chromium, expect } from '@playwright/test';
+import { existsSync } from 'node:fs';
+import process from 'node:process';
 
 // Browser contract tests use explicit in-memory API fixtures. No DB or live API proof.
 const base = process.env.CONTRACT_BASE_URL ?? 'http://127.0.0.1:3000';
 if (new URL(base).hostname !== '127.0.0.1') throw new Error('Loopback preview required');
-const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const browser = await chromium.launch({ headless: true, ...(existsSync(executablePath) ? { executablePath } : {}) });
 const core = { gender: 'female', age: 32, heightCm: 165, weightKg: 72, targetWeightKg: 62, goal: 'lose_weight', activityLevel: 'light', wellnessEligible: true };
 let context;
 async function fixture(overrides = {}, controls = {}) {

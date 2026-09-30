@@ -3,7 +3,8 @@ import "dotenv/config";
 import pg from "pg";
 
 const { Client } = pg;
-const baseUrl = process.env.EDIT_REPORT_BASE_URL ?? "http://127.0.0.1:3000";
+const baseUrl = process.env.EDIT_REPORT_BASE_URL ?? process.env.BROWSER_BASE_URL;
+if (!baseUrl) throw new Error("edit report smoke requires EDIT_REPORT_BASE_URL from a runner-managed loopback server");
 if (new URL(baseUrl).hostname !== "127.0.0.1") throw new Error("edit report smoke only accepts a 127.0.0.1 base URL");
 if (!process.env.DATABASE_URL) throw new Error("edit report smoke requires DATABASE_URL for cleanup");
 const databaseUrl = new URL(process.env.DATABASE_URL);
