@@ -18,7 +18,7 @@ DOTENV_CONFIG_PATH=.env.production.local node -r dotenv/config node_modules/pris
 
 ## Vercel 配置
 
-从 GitHub 导入此仓库的 `main`，Next.js preset、根目录 `./`，沿用 `npm run build`（Prisma generate + Next build）。`vercel.json` 将函数设在东京 `hnd1`，靠近数据库。
+从 GitHub 导入此仓库的 `main`，Next.js preset、根目录 `./`，沿用 `npm run build`（Prisma generate + Next build）。`vercel.json` 将函数设在东京 `hnd1`，靠近数据库；仅 `main` 自动部署。功能分支由 GitHub Actions 在隔离 PostgreSQL 中验证，暂不创建缺少独立数据库的 Preview，也不将演示库连接共享给 Preview。
 
 只向 **Production** 配置两个服务端环境变量：
 
