@@ -431,6 +431,13 @@ describe("submit, results and pay API", () => {
     expect(body.result).not.toHaveProperty("targetDate");
     expect(body.result).not.toHaveProperty("calculationDetails");
     expect(body.result).not.toHaveProperty("plan");
+    expect(body.result).not.toHaveProperty("basis");
+    expect(body.result).not.toHaveProperty("firstWeek");
+    expect(body.result).not.toHaveProperty("reviewPrompts");
+    expect(body.result.planPreview.every((section: Record<string, unknown>) =>
+      Object.keys(section).sort().join(",") === "id,preview,title")).toBe(true);
+    expect(JSON.stringify(body.result.planPreview)).not.toContain("rationale");
+    expect(JSON.stringify(body.result.planPreview)).not.toContain("items");
     expect(body.report).toMatchObject({
       id: expect.any(String),
       calculatedAt: expect.any(String),
@@ -499,10 +506,19 @@ describe("submit, results and pay API", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: "workout",
-          items: expect.arrayContaining([expect.stringContaining("4 home")]),
+          items: expect.arrayContaining([expect.stringContaining("available time")]),
         }),
       ]),
     );
+    expect(afterPayBody.result.plan.basis).toHaveLength(8);
+    expect(afterPayBody.result.plan.basis).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "sleepHours", value: "6.5 hours", source: "answer" }),
+      expect.objectContaining({ field: "mainBarrier", value: "Time", source: "answer" }),
+    ]));
+    expect(afterPayBody.result.plan.firstWeek).toHaveLength(7);
+    expect(afterPayBody.result.plan.reviewPrompts).toEqual(expect.any(Array));
+    expect(afterPayBody.result.plan.sections.every((section: Record<string, unknown>) =>
+      typeof section.rationale === "string" && Array.isArray(section.items))).toBe(true);
 
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: sessionId },

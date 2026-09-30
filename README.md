@@ -98,6 +98,17 @@ erDiagram
 
 响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改或算法版本过期时返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或 `calculationDetails`；两种权限均返回公共 `report` metadata，免费响应的 `lockedFields` 明确列出受保护字段，会员响应的 `lockedFields` 为空。会员响应由 `Subscription.status=active` 授权，并返回可空 `targetDate` 和完整 `calculationDetails`。
 
+会员 `result.plan` 的报告内容由服务端确定性规则生成，不调用大模型、不改变 `wellness-v2` 的数值结果：
+
+- `basis: { field, label, value, source: "answer" | "default" }[]`：区分用户填写的偏好与默认建议；未填写的睡眠、压力、行动障碍明确标为未提供。
+- `sections: { id, title, preview, rationale, items }[]`：训练、饮食、恢复、日常行动四类建议，解释选择依据并提供完整行动条目。
+- `firstWeek: { day, title, actions }[]`：七天起步模板，匹配所选/默认训练频次；可用时长不是必须完成的运动量。
+- `reviewPrompts: string[]`：一周后回顾完成情况、精力和安排的可行性。
+
+这些内容仅在会员 `plan` 中返回；免费 `planPreview` 仍严格只含 `id/title/preview`，不发送完整内容再用 CSS 隐藏。页面解释服务端保存的计算值与三种投影状态，不重复计算公式，也不把估算日期当作承诺。报告是有限输入上的一般健康习惯起步建议，不是个体诊疗、伤病康复或经临床验证的训练处方。
+
+内容依据：[CDC 对 BMI 的用途和限制](https://www.cdc.gov/bmi/about/index.html)、[NIDDK 关于小行动、障碍处理与进度回顾](https://www.niddk.nih.gov/health-information/diet-nutrition/changing-habits-better-health)。这些来源支持解释与建议的组织方式，不代表机构认可本平台或验证其个人预测。
+
 ### `POST /api/pay`
 
 请求：`{ "sessionId": "…", "plan": "monthly" }`，套餐为 `trial`、`monthly` 或 `quarterly`，`plan` 可省略（默认首次支付 `monthly`）。这是模拟支付，不连接 Stripe。
@@ -125,6 +136,8 @@ Vitest 的 API 集成测试使用隔离 PostgreSQL，纯算法测试不依赖数
 ```sh
 npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/health-domain.test.ts
 ```
+
+报告内容另由 `lib/plan.test.ts` 验证回答与默认来源、缺省信息不伪造、训练频次与七天模板、不同饮食/行动障碍以及免费预览白名单；`tests/api/submit-results-pay.test.ts` 验证真实接口的会员内容边界。`scripts/browser-smoke.mjs` 验证页面完整渲染后端条目、三种投影状态及 390px 无横向溢出。可选设置 `REPORT_SCREENSHOT_DIR` 保存合成测试报告截图（默认不生成），便于视觉核对。
 
 ## 需求映射与行为边界
 

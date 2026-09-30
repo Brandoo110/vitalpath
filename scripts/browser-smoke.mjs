@@ -1,6 +1,6 @@
 import { chromium } from "@playwright/test";
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
@@ -20,6 +20,8 @@ let serverOutput = "";
 let browser;
 let page;
 let cleanupError;
+let reportScreenshotsSaved = false;
+let discountDismissals = 0;
 
 function log(message) {
   const line = `${new Date().toISOString()} ${message}`;
@@ -43,6 +45,12 @@ try {
   browser = await chromium.launch({ headless: true, ...(existsSync(executablePath) ? { executablePath } : {}) });
   page = await browser.newPage();
   page.setDefaultTimeout(7_000);
+  const discountOffer = page.getByRole("dialog", { name: "Discount offer", exact: true });
+  const dismissDiscountOffer = async (dialog) => {
+    await dialog.getByRole("button", { name: "Maybe later", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    discountDismissals += 1;
+  };
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Start" }).click();
   await recordCurrentSession();
@@ -64,7 +72,18 @@ try {
   await openRestoredFunnelAt("Which biological sex should we use for the estimate?");
 
   await page.getByRole("button", { name: /Female/ }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
+  const genderSaveResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/assessment" &&
+    response.request().method() === "PATCH" &&
+    response.request().postDataJSON()?.sessionId === firstSessionId &&
+    response.request().postDataJSON()?.data?.gender === "female"
+  );
+  const [savedGender] = await Promise.all([
+    genderSaveResponse,
+    page.getByRole("button", { name: "Continue" }).click(),
+  ]);
+  if (savedGender.status() !== 200) throw new Error(`gender save failed before reload: ${savedGender.status()}`);
+  await page.getByRole("heading", { name: "How old are you?", exact: true }).waitFor();
   await page.reload({ waitUntil: "networkidle" });
   await openRestoredFunnelAt("How old are you?");
   if ((await currentSessionId()) !== firstSessionId) throw new Error("reload changed the anonymous session");
@@ -118,6 +137,19 @@ try {
   await page.getByLabel("Email").fill("browser@example.com");
   await page.getByRole("button", { name: "View my report" }).click();
   await page.getByRole("region", { name: "Payment offer" }).waitFor();
+  // Exercise the real exit-intent listener before any results-page reload can set its storage flag.
+  const dismissalsBeforeExitIntent = discountDismissals;
+  await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    document.dispatchEvent(new MouseEvent("mouseleave", { clientY: 0 }));
+  });
+  await discountOffer.waitFor({ state: "visible" });
+  await dismissDiscountOffer(discountOffer);
+  if (discountDismissals !== dismissalsBeforeExitIntent + 1) throw new Error("exit-intent offer was not dismissed through Maybe later before plan selection");
+  // Register only after the explicit appearance/dismissal test, so it cannot consume that assertion.
+  await page.addLocatorHandler(discountOffer, dismissDiscountOffer);
+  await page.getByRole("button", { name: /12-week plan/ }).click();
+
   await page.getByText(/Model wellness-v2/).waitFor();
 
   const droppedPatchSessionId = await prepareBlankSession(page);
@@ -144,8 +176,6 @@ try {
   await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), droppedPaySessionId);
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("region", { name: "Payment offer" }).waitFor();
-  const payExitOffer = page.getByRole("dialog", { name: "Discount offer" });
-  if (await payExitOffer.isVisible().catch(() => false)) await payExitOffer.getByRole("button", { name: "Maybe later" }).click();
   const payBodies = [];
   await page.route("**/api/pay", async (route) => {
     if (route.request().method() !== "POST") { await route.continue(); return; }
@@ -182,6 +212,8 @@ try {
   if (payCount !== 1) throw new Error(`report retry posted payment ${payCount} times`);
   page.off("request", payRequests);
   await page.unroute("**/api/results?sessionId=*");
+
+  await assertReportDepth(firstSessionId);
 
   let stalePatched = false;
   let staleStatus = null;
@@ -249,6 +281,25 @@ try {
   await page.getByRole("button", { name: "View my report" }).click();
   await page.getByText(/Model wellness-v2/).waitFor();
 
+  await assertFreeReport(partialSessionId);
+  const optionalPay = await apiJson(page, "/api/pay", { method: "POST", body: { sessionId: partialSessionId, plan: "monthly" } });
+  if (optionalPay.status !== 200) throw new Error("optional report unlock failed");
+  await page.reload({ waitUntil: "networkidle" });
+  await assertReportDepth(partialSessionId, true);
+
+  for (const overrides of [
+    { goal: "keep_fit", targetWeightKg: 72 },
+    { goal: "gain_muscle", targetWeightKg: 100 },
+  ]) {
+    const projectionId = await prepareSession(page, true, overrides);
+    await page.evaluate((id) => localStorage.setItem("vitalpath-session-id", id), projectionId);
+    await page.reload({ waitUntil: "networkidle" });
+    const scenario = await apiJson(page, `/api/results?sessionId=${projectionId}`);
+    const expected = overrides.goal === "keep_fit" ? "maintenance" : "not_projected";
+    if (scenario.body.result.calculationDetails.projectionStatus !== expected) throw new Error(`scenario fixture expected ${expected}`);
+    await assertReportDepth(projectionId);
+  }
+
   const unsupportedCases = [
     { name: "age", overrides: { age: 19 }, heading: "How old are you?", field: "Age", message: /age must be between 20 and 78/i, value: "19" },
     { name: "target BMI", overrides: { targetWeightKg: 49 }, heading: /Add your current and target body metrics/, field: "Target weight", message: /target BMI is outside/i, value: "49" },
@@ -297,8 +348,6 @@ try {
     await page.evaluate((sessionId) => window.localStorage.setItem("vitalpath-session-id", sessionId), id);
     await page.reload({ waitUntil: "networkidle" });
     await page.getByRole("region", { name: "Payment offer" }).waitFor();
-    const exitOffer = page.getByRole("dialog", { name: "Discount offer" });
-    if (await exitOffer.isVisible().catch(() => false)) await exitOffer.getByRole("button", { name: "Maybe later" }).click();
     await page.getByRole("button", { name: testCase.planLabel }).click();
     let postedPlan;
     const capturePay = (request) => { if (request.url().endsWith("/api/pay") && request.method() === "POST") postedPlan = request.postDataJSON()?.plan; };
@@ -309,7 +358,7 @@ try {
     if (postedPlan !== testCase.plan) throw new Error(`${testCase.name} CTA used ${postedPlan}, expected ${testCase.plan}`);
   }
 
-  log(`Browser smoke passed session=${firstSessionId} staleStatus=${staleStatus} payPosts=${payCount} log=${logPath}`);
+  log(`Browser smoke passed session=${firstSessionId} staleStatus=${staleStatus} payPosts=${payCount} discountDismissals=${discountDismissals} log=${logPath}`);
 } catch (error) {
   if (page) {
     try { log(`page=${(await page.locator("body").innerText()).slice(0, 1000)}`); } catch { /* page may already be closed */ }
@@ -378,7 +427,7 @@ async function prepareBlankSession(currentPage) {
   return created.body.sessionId;
 }
 
-async function prepareSession(currentPage, paid) {
+async function prepareSession(currentPage, paid, overrides = {}) {
   const created = await apiJson(currentPage, "/api/sessions", { method: "POST", body: {} });
   if (created.status !== 201) throw new Error(`fixture session failed: ${JSON.stringify(created)}`);
   const id = created.body.sessionId;
@@ -391,7 +440,7 @@ async function prepareSession(currentPage, paid) {
         gender: "female", goal: "lose_weight", age: 32, heightCm: 165, weightKg: 72, targetWeightKg: 62,
         activityLevel: "light", pacePreference: "standard", workoutDaysPerWeek: 4, sessionMinutes: 30,
         workoutLocation: "home", dietPreference: "high_protein", sleepHours: 6.5, stressLevel: "medium",
-        mainBarrier: "no_time", healthDataConsent: true, wellnessEligible: true,
+        mainBarrier: "no_time", healthDataConsent: true, wellnessEligible: true, ...overrides,
       },
     },
   });
@@ -485,4 +534,81 @@ function timeout(milliseconds, message) {
     const timer = setTimeout(() => reject(new Error(message)), milliseconds);
     timer.unref();
   });
+}
+
+async function assertFreeReport(id) {
+  const { body, status } = await apiJson(page, `/api/results?sessionId=${id}`);
+  if (status !== 200 || body.result.plan || body.result.calculationDetails) throw new Error("free report leaked protected data");
+  for (const section of body.result.planPreview) {
+    if (Object.keys(section).some((key) => !["id", "title", "preview"].includes(key))) throw new Error("free preview has paid fields");
+  }
+  if (await page.locator('[data-testid="plan-basis"], [data-testid="first-week"], [data-testid="energy-breakdown"]').count()) throw new Error("paid report content rendered in free DOM");
+  await page.getByText(/BMI is a height-and-weight screening measure/).waitFor();
+}
+
+async function assertReportDepth(id, expectDefaults = false) {
+  await page.getByText("Plan unlocked", { exact: true }).waitFor();
+  const { body, status } = await apiJson(page, `/api/results?sessionId=${id}`);
+  if (status !== 200 || !body.result.plan) throw new Error("paid plan unavailable");
+  const plan = body.result.plan;
+  const basis = page.getByTestId("plan-basis");
+  for (const entry of plan.basis) {
+    const row = basis.locator(`[data-field="${entry.field}"]`);
+    await row.waitFor();
+    if (await row.locator("dd").textContent() !== entry.value) throw new Error("basis value differs from API");
+    await row.getByText(entry.source === "answer" ? "Your answer" : "Not answered · Default guidance", { exact: true }).waitFor();
+  }
+  if (expectDefaults && !plan.basis.some((entry) => entry.source === "default")) throw new Error("skipped preferences missing default source");
+  for (const section of plan.sections) {
+    const block = page.locator(`[data-plan-section="${section.id}"]`);
+    await block.getByText(section.rationale, { exact: true }).waitFor();
+    if (await block.locator("li").count() !== section.items.length) throw new Error("report truncated section items");
+    for (const item of section.items) await block.getByText(item, { exact: true }).waitFor();
+  }
+  const days = page.getByTestId("first-week").locator("details");
+  if (plan.firstWeek.length !== 7 || await days.count() !== 7) throw new Error("missing seven-day template");
+  for (let index = 0; index < 7; index += 1) {
+    const day = days.nth(index);
+    await day.locator("summary").click();
+    for (const action of plan.firstWeek[index].actions) await day.getByText(action, { exact: true }).waitFor();
+    await day.locator("summary").click();
+    if (await day.evaluate((element) => element.open)) throw new Error(`day ${index + 1} did not collapse`);
+    await day.locator("ul").waitFor({ state: "hidden" });
+  }
+  for (const prompt of plan.reviewPrompts) await page.getByTestId("plan-review").getByText(prompt, { exact: true }).waitFor();
+  const energy = page.getByTestId("energy-breakdown");
+  const calculation = body.result.calculationDetails;
+  const energyText = (value) => `${Math.round(value).toLocaleString("en-US")} kcal/day`;
+  const displayed = await energy.locator("dd").allTextContents();
+  const expectedEnergy = [energyText(calculation.REE), `× ${calculation.assumptions.activityMultiplier}`, energyText(calculation.TDEE), `${calculation.actualEnergyDifference > 0 ? "+" : ""}${energyText(calculation.actualEnergyDifference)}`];
+  if (JSON.stringify(displayed) !== JSON.stringify(expectedEnergy)) throw new Error("report energy values differ from API");
+  const projection = calculation.projectionStatus;
+  await page.getByTestId("projection-explanation").getByText({
+    projected: /conditional estimate, not a deadline or guarantee/,
+    maintenance: /Equal current and target weight/,
+    not_projected: /does not reach your target within one year/,
+  }[projection]).waitFor();
+  const viewport = page.viewportSize();
+  const screenshotDir = process.env.REPORT_SCREENSHOT_DIR;
+  const captureReport = screenshotDir && !reportScreenshotsSaved;
+  if (captureReport) {
+    mkdirSync(screenshotDir, { recursive: true });
+    await captureReportScreenshots(screenshotDir, "desktop");
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error("390px report overflows horizontally");
+  if (captureReport) {
+    await captureReportScreenshots(screenshotDir, "390");
+    reportScreenshotsSaved = true;
+  }
+  await page.setViewportSize(viewport);
+}
+
+async function captureReportScreenshots(directory, size) {
+  await page.evaluate(async () => {
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  await page.screenshot({ path: path.join(directory, `report-${size}.png`), fullPage: false });
+  await page.screenshot({ path: path.join(directory, `report-${size}-full.png`), fullPage: true });
 }
