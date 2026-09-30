@@ -32,11 +32,22 @@ export function unprocessable(code: string, message: string, details?: ErrorDeta
 
 export function toErrorBody(error: unknown) {
   if (error instanceof AppError) {
-    return {
+    const body = {
       error: error.code,
       message: error.message,
       ...(error.details ? { details: error.details } : {}),
     };
+    if (error.details && !Array.isArray(error.details) && typeof error.details === "object") {
+      const details = error.details as Record<string, unknown>;
+      return {
+        ...body,
+        ...(details.issues ? { issues: details.issues } : {}),
+        ...(details.missingFields ? { missingFields: details.missingFields } : {}),
+        ...(details.nextStep !== undefined ? { nextStep: details.nextStep } : {}),
+        ...(details.nextAction ? { nextAction: details.nextAction } : {}),
+      };
+    }
+    return body;
   }
 
   return {

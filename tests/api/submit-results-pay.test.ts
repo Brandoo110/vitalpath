@@ -31,6 +31,9 @@ describe("submit, results and pay API", () => {
 
     expect(response.status).toBe(400);
     expect(body.error).toBe("bad_request");
+    expect(body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "version" }),
+    ]));
   });
 
   it("rejects_missing_required_health_fields", async () => {
@@ -61,6 +64,15 @@ describe("submit, results and pay API", () => {
       "targetWeightKg",
       "activityLevel",
     ]);
+    expect(body.issues).toEqual([
+      { field: "age", message: "This field is required" },
+      { field: "heightCm", message: "This field is required" },
+      { field: "weightKg", message: "This field is required" },
+      { field: "targetWeightKg", message: "This field is required" },
+      { field: "activityLevel", message: "This field is required" },
+    ]);
+    expect(body.nextStep).toBe(1);
+    expect(body.nextAction).toBe("continue_assessment");
 
     const resultCount = await prisma.result.count({ where: { userId: sessionId } });
     expect(resultCount).toBe(0);
@@ -134,6 +146,44 @@ describe("submit, results and pay API", () => {
     const body = await response.json();
     expect(response.status).toBe(422);
     expect(body.error).toBe("assessment_invalid");
+    expect(body.issues).toEqual([
+      { field: "wellnessEligible", message: "Confirm this estimate applies to you before submitting" },
+    ]);
+    expect(body.nextStep).toBe(9);
+    expect(body.nextAction).toBe("continue_assessment");
+    expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(0);
+  });
+
+  it("requires_explicit_health_data_consent_at_submit", async () => {
+    const sessionId = await createSessionId();
+    await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 9,
+      version: 0,
+      data: {
+        gender: "female",
+        goal: "lose_weight",
+        age: 32,
+        heightCm: 165,
+        weightKg: 72,
+        targetWeightKg: 62,
+        activityLevel: "light",
+        wellnessEligible: true,
+      },
+    }));
+
+    const response = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body).toMatchObject({
+      error: "assessment_invalid",
+      issues: [{ field: "healthDataConsent", message: "Health data consent is required before submitting" }],
+      nextStep: 9,
+      nextAction: "continue_assessment",
+    });
     expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(0);
   });
 

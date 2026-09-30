@@ -2,6 +2,7 @@ import type { Assessment } from "@/app/generated/prisma/client";
 import { mapAnswerRows, type ExtendedAssessmentAnswers } from "@/lib/assessment-answers";
 import { handleRouteError, jsonResponse, readJson } from "@/lib/api";
 import { assessmentWithAnswers, lockAssessment, lockUser } from "@/lib/assessment-service";
+import { deriveAssessmentProgress } from "@/lib/assessment-progress";
 import { conflict, notFound, unprocessable } from "@/lib/errors";
 import { calculateHealthResult, healthAlgorithmVersion, type HealthInput } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
@@ -36,7 +37,11 @@ export async function POST(request: Request) {
 
       const assessment = user.assessment;
       if (!assessment) {
-        return { kind: "incomplete" as const, missingFields: [...requiredHealthFields] };
+        return {
+          kind: "incomplete" as const,
+          missingFields: [...requiredHealthFields],
+          nextStep: 0,
+        };
       }
       if (input.version !== assessment.version) {
         throw conflict("version_conflict", "Assessment version is stale", {
@@ -45,15 +50,37 @@ export async function POST(request: Request) {
         });
       }
 
+      const progress = deriveAssessmentProgress(assessment, user.healthDataConsent, user.result);
       const missingFields = collectMissingFields(assessment);
       if (missingFields.length > 0) {
-        return { kind: "incomplete" as const, missingFields };
+        return {
+          kind: "incomplete" as const,
+          missingFields,
+          nextStep: progress.nextStep,
+        };
+      }
+      if (user.healthDataConsent !== true) {
+        throw unprocessable(
+          "assessment_invalid",
+          "Health data consent is required before submitting",
+          {
+            field: "healthDataConsent",
+            issues: [{ field: "healthDataConsent", message: "Health data consent is required before submitting" }],
+            nextStep: 9,
+            nextAction: "continue_assessment",
+          },
+        );
       }
       if (assessment.wellnessEligible !== true) {
         throw unprocessable(
           "assessment_invalid",
           "Confirm that this estimate is appropriate before submitting",
-          { field: "wellnessEligible" },
+          {
+            field: "wellnessEligible",
+            issues: [{ field: "wellnessEligible", message: "Confirm this estimate applies to you before submitting" }],
+            nextStep: 9,
+            nextAction: "continue_assessment",
+          },
         );
       }
 
@@ -79,7 +106,13 @@ export async function POST(request: Request) {
         const resultInput = toHealthInput(assessment, extendedAnswers, calculatedAt);
         calculatedResult = calculateHealthResult(resultInput);
       } catch (error) {
-        throw unprocessable("assessment_invalid", errorMessage(error));
+        const message = errorMessage(error);
+        const field = healthInputField(message);
+        throw unprocessable("assessment_invalid", message, {
+          issues: [{ field, message }],
+          nextStep: 9,
+          nextAction: "review_assessment",
+        });
       }
 
       const savedResult = await tx.result.upsert({
@@ -123,6 +156,9 @@ export async function POST(request: Request) {
           error: "assessment_incomplete",
           message: "Assessment is missing required health fields",
           missingFields: result.missingFields,
+          issues: result.missingFields.map((field) => ({ field, message: "This field is required" })),
+          nextStep: result.nextStep,
+          nextAction: "continue_assessment",
         },
         { status: 422 },
       );
@@ -160,4 +196,9 @@ function toHealthInput(
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Assessment data is invalid";
+}
+
+function healthInputField(message: string) {
+  const fields = ["age", "heightCm", "weightKg", "targetWeightKg", "goal", "activityLevel"];
+  return fields.find((field) => message.includes(field)) ?? "assessment";
 }
