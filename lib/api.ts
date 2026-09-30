@@ -26,6 +26,10 @@ export function handleRouteError(error: unknown) {
           path: issue.path.join("."),
           message: issue.message,
         })),
+        issues: error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          message: issue.message,
+        })),
       },
       { status: 400 },
     );

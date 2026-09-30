@@ -16,17 +16,11 @@ VitalPath 是一个匿名健康测评 funnel：分步保存与恢复、服务端
 npm ci
 npx prisma generate
 npx prisma migrate deploy
-npm test -- --maxWorkers=1
-npm run lint
-npm run build
-npm run test:migration
-npm run test:http
-npm run test:http:failure-cleanup
-npm run test:browser
-npm run test:browser:failure-cleanup
+npx playwright install chromium
+npm run verify:all
 ```
 
-开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`test:browser` 使用单 worker Chromium；优先使用本机已有 Chrome，否则先运行 `npx playwright install chromium`。它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。不要把测试连接到生产数据库。
+开发时也可以运行 `npm run dev`，然后访问 `http://localhost:3000`。API smoke 使用 `BASE_URL` 作为 cURL 前缀，例如 `BASE_URL=http://localhost:3000`；本仓库没有线上 BASE_URL。`test:http` 会选择空闲端口，直接启动本仓库的 production Next 服务，通过真实 HTTP 跑完整流程，最后只删除本次创建的 session；失败清理脚本会验证异常退出也删除 session。`verify:all` 是 CI 使用的单一完整入口，要求隔离 PostgreSQL 已初始化、Prisma client 已生成，并在浏览器两项前先安装 Chromium（`npx playwright install chromium` 或 CI 的 `--with-deps`）。`test:browser` 使用单 worker Chromium；它跑真实 Next + PostgreSQL funnel、刷新恢复、统一套餐、支付后读取失败重试、真实 stale/算法过期恢复、冲突保护、编辑取消、丢响应重放、可选步骤跳过、422 修正和三类 CTA；`test:browser:failure-cleanup` 还验证可控失败后的 session、端口、浏览器和服务进程清理。当前候选已在本机隔离数据库上运行这两项浏览器命令；不要把测试连接到生产数据库。
 
 ## 数据模型
 
@@ -54,7 +48,19 @@ erDiagram
 
 ### `GET /api/assessment?sessionId=…`
 
-返回保存的核心字段、扩展答案、`step`、`completed` 和当前 `version`。`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。没有测评时返回 `assessment: null, version: 0`。
+响应带 `Cache-Control: private, no-store`，返回保存的核心字段、扩展答案、`step`、`completed`、当前 `version`，以及恢复状态：`nextStep`、`missingFields` 和 `state`（`empty`、`draft`、`completed` 或 `stale`）。没有测评时的形状是：
+
+```json
+{
+  "assessment": null,
+  "version": 0,
+  "nextStep": 1,
+  "missingFields": ["gender", "goal", "age"],
+  "state": "empty"
+}
+```
+
+`step` 只是客户端恢复游标，不是完成证明；提交资格由服务端必填核心字段和当前 version 决定。匿名 `sessionId` 是本地演示用的 bearer 身份，没有登录或生产级认证语义；服务端仍会拒绝格式错误或未知 session，调用方不得把它当作可公开分享的生产凭证。
 
 ### `PATCH /api/assessment`
 
@@ -69,15 +75,28 @@ erDiagram
 }
 ```
 
-成功响应包含递增后的 `version`。同一测评行在事务中锁定；旧版本返回 `409 version_conflict`。所有核心字段、扩展答案、同意状态和 `completed=false` 同事务写入。
+成功响应包含递增后的 `version`、`nextStep`、`missingFields`、`state`、`step` 和 `completed`。例如：
+
+```json
+{
+  "version": 2,
+  "step": 2,
+  "completed": false,
+  "nextStep": 3,
+  "missingFields": ["heightCm", "weightKg", "targetWeightKg"],
+  "state": "draft"
+}
+```
+
+同一测评行在事务中锁定；旧版本返回 `409 version_conflict`，不会覆盖新值。相同语义字段的 no-op 保存保持 `version`、结果和 `completed` 不变；只提高 `step` 的 step-only 保存只推进恢复游标，不使报告过期；核心字段、扩展答案或同意状态真实变化会递增 `version`、把 `completed` 置为 `false` 并使旧报告进入 `stale`。所有写入在同一事务中完成。提交和 PATCH 都必须使用服务端最近一次返回的 version，旧 version 没有绕过方式。
 
 ### `POST /api/assessment/submit`
 
-请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，不创建或覆盖结果。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
+请求：`{ "sessionId": "…", "version": 2 }`。成功响应：`{ "ok": true, "resultId": "…" }`。服务器在锁定的测评快照上计算，并持久化 `calculatedAt`、`algorithmVersion`、`calculationDetails` 和来源版本。`healthDataConsent` 与 `wellnessEligible` 未明确为 `true`、目标方向或支持域不符合时返回 `422 assessment_invalid`，响应带字段化 `issues`、`nextStep` 和 `nextAction`，不创建或覆盖结果；缺少核心字段时保留 `missingFields` 并返回相同结构化定位信息。同版本重复提交返回原结果，不刷新日期；版本已变化返回 `409 version_conflict`。首次支付可以先于 submit，但只有 submit 成功后结果接口才有可读取报告；支付不会绕过 consent、支持域或算法校验。算法依据见 [docs/health-algorithm.md](docs/health-algorithm.md)。
 
 ### `GET /api/results?sessionId=…`
 
-响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改或算法版本过期时返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或 `calculationDetails`。会员响应由 `Subscription.status=active` 授权，并返回可空 `targetDate` 和完整 `calculationDetails`。
+响应带 `Cache-Control: private, no-store`。没有结果返回 `409 assessment_not_submitted`；测评修改或算法版本过期时返回 `409 assessment_stale`。免费响应只含 BMI、分类、宽泛热量区间和 plan preview，绝不含精确 `recommendedCalories`、`targetDate` 或 `calculationDetails`；两种权限均返回公共 `report` metadata，免费响应的 `lockedFields` 明确列出受保护字段，会员响应的 `lockedFields` 为空。会员响应由 `Subscription.status=active` 授权，并返回可空 `targetDate` 和完整 `calculationDetails`。
 
 ### `POST /api/pay`
 
@@ -106,6 +125,29 @@ Vitest 的 API 集成测试使用隔离 PostgreSQL，纯算法测试不依赖数
 ```sh
 npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/health-domain.test.ts
 ```
+
+## 需求映射与行为边界
+
+四阶段后端完善保持 wellness-v2 数值公式不变。实现与边界如下：
+
+| 原题要求 | 为什么测这些场景 | 测试文件 / 命令 |
+| --- | --- | --- |
+| 一：核心字段分步保存 | 部分输入可以持久化，未提交字段不能被覆盖，非法类型不能入库 | `tests/api/assessment.test.ts`：partial patch、numeric injection、invalid payload；`npm test` |
+| 一：中断后恢复 | 服务器答案决定真实缺项，高 step 不能掩盖缺失；确认过的 consent 不再算缺失 | `tests/api/assessment.test.ts`：empty progress、next step、partial restore；`scripts/browser-smoke.mjs`：刷新恢复 |
+| 一：重复、乱序和并发更新 | 无变化不使报告失效；真实改动更新版本；两个相同版本请求不能互相覆盖 | `tests/api/assessment.test.ts`：no-op、out of order、concurrent patch/first save；`tests/api/consistency-barrier.test.ts`：真实数据库锁交错 |
+| 二：BMI、建议摄入量、预测日期 | 公式和边界有独立预期，极端/缺失/非法输入被拒绝，无合理日期时明确为空 | `lib/health.test.ts`、`tests/health-v2.test.ts`、`tests/health-domain.test.ts`；运行见上方 focused 命令 |
+| 二：后端提交与持久化 | 不能绕过两项确认；错误定位可修复；失败不覆盖旧结果，同版本提交不刷新报告 | `tests/api/submit-results-pay.test.ts`：required fields、consent、eligibility、unsupported submit、repeat submit |
+| 二：结果关联用户与测评 | 数据库直接拒绝跨用户绑定；迁移保留合法数据、非法历史关联时整体回滚 | `tests/db/constraints.test.ts`；`scripts/verify-migration.mjs`；`npm run test:migration` |
+| 三：订阅鉴权及非会员脱敏 | 检查整个免费响应的保护字段；A付费不能激活B，退回free后立即重新脱敏 | `tests/api/submit-results-pay.test.ts`：protected keys、session isolation、合法状态回退 |
+| 三：会员完整结果 | 支付前后为同一报告，新增精确热量、日期、计算明细和计划；过期报告不能绕过校验 | `tests/api/submit-results-pay.test.ts`：unlock、stale；`scripts/http-smoke.mjs` |
+| 三：模拟 /pay 闭环 | 相同套餐保留首次paidAt；不同套餐冲突；并发支付只有一个胜者；允许提前支付 | `tests/api/submit-results-pay.test.ts`：idempotent pay、plan conflict、competing payments、pay before submit |
+| 四：已提交但响应丢失 | 真HTTP代理在上游成功后断开客户端，读回PATCH，并核对submit的resultId及pay首次paidAt与数据库一致；非2xx不能假绿 | `scripts/http-smoke.mjs`；`npm run test:http` |
+| 四：完整浏览器流程 | 用真实Next/PostgreSQL验证用户填写、刷新、冲突、权威 nextStep、丢响应重放、支付后报告读取、编辑取消、可选步骤跳过和 422 修正 | `scripts/browser-smoke.mjs`；`npm run test:browser`、`npm run test:browser:failure-cleanup` |
+| 四：自动化运行与失败清理 | 单worker避免共享数据库测试互扰；失败必须返回非零，并清理本次session/服务/浏览器 | `npm test`；`npm run verify`（lint、测试、类型）；`npm run verify:all`（另含迁移、build、HTTP/browser及各自failure-cleanup）；CI复用完整入口 |
+
+边界与未覆盖原因：测试使用小规模隔离数据库，覆盖本题状态与异常，不做压力/长稳和所有浏览器设备矩阵；真实身份、支付provider/webhook未实现，因此没有对应集成测试。算法验证针对明确的产品输入域，不能证明临床效果。公网演示是原题必交付物，目前尚未部署，其URL、已付费演示session和线上验证仍待补齐。数据库约束的精确SQL定义及迁移回滚已有测试，不把Prisma generate/validate称为生产迁移或完整schema drift证明。
+
+扩展问卷仍为可选项；真实登录、支付、临床模型、压力/长稳和线上部署保持在范围外。
 
 ## AI 使用复盘
 

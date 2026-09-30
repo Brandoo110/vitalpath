@@ -1,3 +1,4 @@
+import http from "node:http";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
@@ -17,6 +18,7 @@ let serverExitResult;
 let ready;
 let serverOutput = "";
 let serverSpawnError;
+let dropProxy;
 
 try {
   server = spawn(process.execPath, [nextBin, "start", "--hostname", "127.0.0.1", "-p", String(port)], {
@@ -66,10 +68,42 @@ try {
     throw new Error("intentional HTTP smoke lifecycle failure");
   }
 
-  const first = await request("/api/assessment", json("PATCH", {
+  dropProxy = await createDropResponseProxy(baseUrl);
+  const invalidProxyResponse = await fetch(dropProxy.url("/api/assessment"), json("PATCH", {
+    sessionId, step: -1, version: 0, data: {},
+  }));
+  const invalidProxyBody = await invalidProxyResponse.json();
+  if (invalidProxyResponse.status !== 400 || invalidProxyBody.error !== "bad_request") {
+    throw new Error("drop proxy did not propagate a deterministic non-2xx upstream response");
+  }
+  const invalidEvidence = dropProxy.lastUpstream();
+  if (invalidEvidence.status !== 400 || JSON.parse(invalidEvidence.body).error !== "bad_request") {
+    throw new Error("drop proxy did not retain the non-2xx upstream evidence");
+  }
+  await expectDroppedRequest(dropProxy.url("/api/assessment"), json("PATCH", {
     sessionId, step: 1, version: 0,
     data: { gender: "female", goal: "lose_weight", age: 32 },
   }));
+  const first = await request(`/api/assessment?sessionId=${sessionId}`);
+  if (first.version !== 1 || first.assessment?.gender !== "female" || first.assessment?.age !== 32) {
+    throw new Error("dropped PATCH response did not leave the saved version and values readable");
+  }
+  const patchEvidence = dropProxy.lastUpstream();
+  if (patchEvidence.status !== 200 || JSON.parse(patchEvidence.body).version !== 1) {
+    throw new Error("drop proxy did not retain the successful PATCH response evidence");
+  }
+  const stalePatch = await fetch(`${baseUrl}/api/assessment`, json("PATCH", {
+    sessionId, step: 2, version: 0,
+    data: { gender: "male" },
+  }));
+  const staleBody = await stalePatch.json();
+  if (stalePatch.status !== 409 || staleBody.error !== "version_conflict") {
+    throw new Error("stale PATCH did not return version_conflict");
+  }
+  const afterConflict = await request(`/api/assessment?sessionId=${sessionId}`);
+  if (afterConflict.version !== 1 || afterConflict.assessment?.gender !== "female") {
+    throw new Error("stale PATCH overwrote the committed values");
+  }
   const second = await request("/api/assessment", json("PATCH", {
     sessionId, step: 9, version: first.version,
     data: {
@@ -83,19 +117,49 @@ try {
   if (restored.version !== second.version || restored.assessment?.age !== 32) {
     throw new Error("assessment recovery did not return the saved version and fields");
   }
-  await request("/api/assessment/submit", json("POST", { sessionId, version: second.version }));
+  await expectDroppedRequest(dropProxy.url("/api/assessment/submit"), json("POST", {
+    sessionId,
+    version: second.version,
+  }));
+  const submitEvidence = dropProxy.lastUpstream();
+  if (submitEvidence.status !== 200 || !JSON.parse(submitEvidence.body).resultId) {
+    throw new Error("drop proxy did not retain the successful submit response evidence");
+  }
+  const replayedSubmit = await request("/api/assessment/submit", json("POST", {
+    sessionId,
+    version: second.version,
+  }));
+  if (!replayedSubmit.resultId || replayedSubmit.resultId !== JSON.parse(submitEvidence.body).resultId) {
+    throw new Error("submit replay did not recover the same committed result");
+  }
   const free = await request(`/api/results?sessionId=${sessionId}`);
-  if (!free.needPaywall || "recommendedCalories" in free.result || "targetDate" in free.result || "plan" in free.result) {
+  if (!free.needPaywall || "recommendedCalories" in free.result || "targetDate" in free.result || "plan" in free.result ||
+      free.report?.algorithmVersion !== "wellness-v2" || !free.lockedFields?.includes("calculationDetails")) {
     throw new Error("free results leaked protected fields");
   }
-  await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
+  await expectDroppedRequest(dropProxy.url("/api/pay"), json("POST", { sessionId, plan: "monthly" }));
+  const payEvidence = dropProxy.lastUpstream();
+  const firstPay = JSON.parse(payEvidence.body);
+  if (payEvidence.status !== 200 || firstPay.subscriptionStatus !== "active" || firstPay.plan !== "monthly" || !firstPay.paidAt) {
+    throw new Error("drop proxy did not retain the successful pay response evidence");
+  }
+  const replayedPay = await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
+  const repeatedPay = await request("/api/pay", json("POST", { sessionId, plan: "monthly" }));
+  if (replayedPay.paidAt !== firstPay.paidAt || repeatedPay.paidAt !== firstPay.paidAt ||
+      replayedPay.plan !== firstPay.plan || repeatedPay.plan !== firstPay.plan ||
+      replayedPay.subscriptionStatus !== firstPay.subscriptionStatus || repeatedPay.subscriptionStatus !== firstPay.subscriptionStatus) {
+    throw new Error("pay replay did not preserve paidAt");
+  }
+  await assertSingleSubscription(sessionId, firstPay);
   const paid = await request(`/api/results?sessionId=${sessionId}`);
-  if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.plan || !paid.result.calculationDetails) {
+  if (paid.needPaywall || typeof paid.result.recommendedCalories !== "number" || !paid.result.plan || !paid.result.calculationDetails ||
+      paid.report?.algorithmVersion !== "wellness-v2" || paid.lockedFields?.length !== 0) {
     throw new Error("paid results did not expose the complete report");
   }
   console.log("HTTP smoke passed", { sessionId, version: second.version });
 } finally {
   try {
+    await dropProxy?.close();
     await cleanup();
   } finally {
     const stopped = await stopServer();
@@ -105,6 +169,73 @@ try {
       code: stopped?.code ?? null,
       signal: stopped?.signal ?? null,
     }));
+  }
+}
+
+async function createDropResponseProxy(upstreamUrl) {
+  let lastUpstream;
+  const proxy = http.createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = chunks.length ? Buffer.concat(chunks) : undefined;
+      const upstream = await fetch(`${upstreamUrl}${request.url}`, {
+        method: request.method,
+        headers: Object.fromEntries(Object.entries(request.headers).filter(([key]) => key !== "host")),
+        body,
+        duplex: "half",
+      });
+      const upstreamBody = Buffer.from(await upstream.arrayBuffer());
+      lastUpstream = { status: upstream.status, body: upstreamBody.toString("utf8") };
+      if (!upstream.ok) {
+        response.statusCode = upstream.status;
+        response.setHeader("content-type", "application/json");
+        response.end(upstreamBody);
+        return;
+      }
+      // The upstream has committed, then the client connection is destroyed.
+      response.destroy();
+    } catch (error) {
+      response.destroy(error);
+    }
+  });
+  await new Promise((resolve, reject) => {
+    proxy.once("error", reject);
+    proxy.listen(0, "127.0.0.1", resolve);
+  });
+  const address = proxy.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    url: (pathname) => `http://127.0.0.1:${port}${pathname}`,
+    lastUpstream: () => {
+      if (!lastUpstream) throw new Error("drop proxy has no upstream response evidence");
+      return lastUpstream;
+    },
+    close: () => new Promise((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve())),
+  };
+}
+
+async function expectDroppedRequest(url, options) {
+  try {
+    await fetch(url, options);
+  } catch {
+    return;
+  }
+  throw new Error(`expected the dropped response from ${url}`);
+}
+
+async function assertSingleSubscription(userId, expected) {
+  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    const result = await client.query('SELECT "status", "plan", "paidAt" AT TIME ZONE \'UTC\' AS "paidAt" FROM "subscriptions" WHERE "userId" = $1', [userId]);
+    const row = result.rows[0];
+    const actualPaidAt = row?.paidAt ? new Date(row.paidAt).toISOString() : null;
+    if (result.rowCount !== 1 || row.status !== expected.subscriptionStatus || row.plan !== expected.plan || actualPaidAt !== expected.paidAt) {
+      throw new Error(`pay replay did not leave one stable subscription: rows=${result.rowCount}, expectedPaidAt=${expected.paidAt ?? "null"}, actualPaidAt=${actualPaidAt ?? "null"}`);
+    }
+  } finally {
+    await client.end();
   }
 }
 

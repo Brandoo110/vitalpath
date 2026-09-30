@@ -46,26 +46,8 @@ jobs:
       - name: Apply migrations
         run: npx prisma migrate deploy
 
-      - name: Verify migration upgrade and rollback
-        run: npm run test:migration
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Test
-        run: npm test -- --maxWorkers=1
-
-      - name: Build
-        run: npm run build
-
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Browser smoke
-        run: npm run test:browser
-
-      - name: HTTP smoke
-        run: npm run test:http
-
-      - name: HTTP smoke failure cleanup
-        run: npm run test:http:failure-cleanup
+      - name: Verify all
+        run: npm run verify:all

@@ -2,6 +2,7 @@ import type { Assessment } from "@/app/generated/prisma/client";
 import { mapAnswerRows, type ExtendedAssessmentAnswers } from "@/lib/assessment-answers";
 import { handleRouteError, jsonResponse, readJson } from "@/lib/api";
 import { assessmentWithAnswers, lockAssessment, lockUser } from "@/lib/assessment-service";
+import { deriveAssessmentProgress } from "@/lib/assessment-progress";
 import { conflict, notFound, unprocessable } from "@/lib/errors";
 import { calculateHealthResult, healthAlgorithmVersion, type HealthInput } from "@/lib/health";
 import { prisma } from "@/lib/prisma";
@@ -36,7 +37,13 @@ export async function POST(request: Request) {
 
       const assessment = user.assessment;
       if (!assessment) {
-        return { kind: "incomplete" as const, missingFields: [...requiredHealthFields] };
+        const progress = deriveAssessmentProgress(null, user.healthDataConsent, user.result);
+        return {
+          kind: "incomplete" as const,
+          missingFields: [...requiredHealthFields],
+          nextStep: 0,
+          issues: progress.missingFields.map((field) => ({ field, message: "This field is required" })),
+        };
       }
       if (input.version !== assessment.version) {
         throw conflict("version_conflict", "Assessment version is stale", {
@@ -45,15 +52,35 @@ export async function POST(request: Request) {
         });
       }
 
+      const progress = deriveAssessmentProgress(assessment, user.healthDataConsent, user.result);
       const missingFields = collectMissingFields(assessment);
       if (missingFields.length > 0) {
-        return { kind: "incomplete" as const, missingFields };
+        return {
+          kind: "incomplete" as const,
+          missingFields,
+          nextStep: progress.nextStep,
+          issues: progress.missingFields.map((field) => ({ field, message: "This field is required" })),
+        };
       }
-      if (assessment.wellnessEligible !== true) {
+      const missingConfirmationFields = progress.missingFields.filter(
+        (field) => field === "healthDataConsent" || field === "wellnessEligible",
+      );
+      if (missingConfirmationFields.length > 0) {
+        const confirmationIssues = missingConfirmationFields.map((field) => ({
+          field,
+          message: field === "healthDataConsent"
+            ? "Health data consent is required before submitting"
+            : "Confirm this estimate applies to you before submitting",
+        }));
         throw unprocessable(
           "assessment_invalid",
-          "Confirm that this estimate is appropriate before submitting",
-          { field: "wellnessEligible" },
+          confirmationIssues[0].message,
+          {
+            field: confirmationIssues[0].field,
+            issues: confirmationIssues,
+            nextStep: 9,
+            nextAction: "continue_assessment",
+          },
         );
       }
 
@@ -79,7 +106,13 @@ export async function POST(request: Request) {
         const resultInput = toHealthInput(assessment, extendedAnswers, calculatedAt);
         calculatedResult = calculateHealthResult(resultInput);
       } catch (error) {
-        throw unprocessable("assessment_invalid", errorMessage(error));
+        const message = errorMessage(error);
+        const field = healthInputField(message);
+        throw unprocessable("assessment_invalid", message, {
+          issues: [{ field, message }],
+          nextStep: healthInputStep(field),
+          nextAction: "review_assessment",
+        });
       }
 
       const savedResult = await tx.result.upsert({
@@ -123,6 +156,9 @@ export async function POST(request: Request) {
           error: "assessment_incomplete",
           message: "Assessment is missing required health fields",
           missingFields: result.missingFields,
+          issues: result.issues,
+          nextStep: result.nextStep,
+          nextAction: "continue_assessment",
         },
         { status: 422 },
       );
@@ -160,4 +196,20 @@ function toHealthInput(
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Assessment data is invalid";
+}
+
+function healthInputField(message: string) {
+  const fields = ["age", "heightCm", "weightKg", "targetWeightKg", "goal", "activityLevel"];
+  const directField = fields.find((field) => message.includes(field));
+  if (directField) return directField;
+  if (/target BMI/i.test(message)) return "targetWeightKg";
+  return "assessment";
+}
+
+function healthInputStep(field: string) {
+  if (field === "age") return 1;
+  if (["heightCm", "weightKg", "targetWeightKg", "assessment"].includes(field)) return 2;
+  if (field === "goal") return 3;
+  if (field === "activityLevel") return 5;
+  return 9;
 }

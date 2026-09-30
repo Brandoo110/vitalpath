@@ -11,10 +11,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const migrationRoot = path.join(root, "prisma", "migrations");
 const consistencyMigrationPath = path.join(migrationRoot, "20260930090000_backend_consistency", "migration.sql");
 const wellnessMigrationPath = path.join(migrationRoot, "20260930103000_wellness_v2", "migration.sql");
+const ownershipMigrationPath = path.join(migrationRoot, "20260930120000_result_assessment_owner", "migration.sql");
 const consistencyMigration = await fs.readFile(consistencyMigrationPath, "utf8");
 const wellnessMigration = await fs.readFile(wellnessMigrationPath, "utf8");
+const ownershipMigration = await fs.readFile(ownershipMigrationPath, "utf8");
 const oldMigrations = (await fs.readdir(migrationRoot, { withFileTypes: true }))
-  .filter((entry) => entry.isDirectory() && !["20260930090000_backend_consistency", "20260930103000_wellness_v2"].includes(entry.name))
+  .filter((entry) => entry.isDirectory() && ![
+    "20260930090000_backend_consistency",
+    "20260930103000_wellness_v2",
+    "20260930120000_result_assessment_owner",
+  ].includes(entry.name))
   .map((entry) => entry.name)
   .sort();
 
@@ -30,6 +36,7 @@ const databases = [
   `vitalpath_migration_numeric_${suffix}`,
   `vitalpath_migration_completed_${suffix}`,
   `vitalpath_migration_answer_${suffix}`,
+  `vitalpath_migration_owner_${suffix}`,
 ];
 
 try {
@@ -61,7 +68,8 @@ try {
       VALUES ('00000000-0000-4000-8000-000000000502', '00000000-0000-4000-8000-000000000501-assessment', 'question_session_minutes', '30', 30)
     `);
   }, "assessment answer must contain exactly one value");
-  console.log("Migration verification passed: retained data plus conflict, orphan, numeric, completion and answer rollback cases");
+  await verifyOwnershipRollback(databases[6]);
+  console.log("Migration verification passed: retained data plus conflict, orphan, numeric, completion, answer and ownership rollback cases");
 } finally {
   for (const database of databases) await dropDatabase(database).catch(() => undefined);
 }
@@ -76,9 +84,13 @@ async function verifyRetained(database) {
     `);
     await client.query(consistencyMigration);
     await client.query(wellnessMigration);
+    await client.query(ownershipMigration);
     const retained = await client.query(`
       SELECT u."id", a."age", a."version", a."wellnessEligible", aa."valueText", r."assessmentId", r."sourceAssessmentVersion", r."recommendedCalories", r."targetDate", r."calculationDetails", r."algorithmVersion", s."status", s."plan",
-             (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'subscriptionStatus') AS "oldStatusColumn"
+             (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'subscriptionStatus') AS "oldStatusColumn",
+             (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'assessments_id_userId_key') AS "assessmentOwnerDefinition",
+             (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'results_assessmentId_userId_key') AS "resultOwnerDefinition",
+             (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'results_assessmentId_userId_fkey') AS "resultOwnerForeignKey"
       FROM "users" u
       JOIN "assessments" a ON a."userId" = u."id"
       JOIN "assessment_answers" aa ON aa."assessmentId" = a."id"
@@ -87,13 +99,55 @@ async function verifyRetained(database) {
       WHERE u."id" = '00000000-0000-4000-8000-000000000001'
     `);
     const row = retained.rows[0];
-    if (!row || row.age !== 32 || row.version !== 3 || row.wellnessEligible !== null || row.valueText !== "standard" || !row.assessmentId || row.sourceAssessmentVersion !== null || row.recommendedCalories !== 1467 || row.targetDate === null || row.calculationDetails !== null || row.algorithmVersion !== "v1" || row.status !== "free" || row.plan !== null || row.oldStatusColumn !== null) {
+    if (!row || row.age !== 32 || row.version !== 3 || row.wellnessEligible !== null || row.valueText !== "standard" || !row.assessmentId || row.sourceAssessmentVersion !== null || row.recommendedCalories !== 1467 || row.targetDate === null || row.calculationDetails !== null || row.algorithmVersion !== "v1" || row.status !== "free" || row.plan !== null || row.oldStatusColumn !== null || row.assessmentOwnerDefinition !== 'UNIQUE (id, "userId")' || row.resultOwnerDefinition !== 'UNIQUE ("assessmentId", "userId")' || row.resultOwnerForeignKey !== 'FOREIGN KEY ("assessmentId", "userId") REFERENCES assessments(id, "userId") ON UPDATE CASCADE ON DELETE CASCADE') {
       throw new Error("legal historical data was not retained with unknown v2 eligibility and calculation semantics");
     }
     await client.query(`UPDATE "results" SET "targetDate" = NULL, "calculationDetails" = '{"projectionStatus":"maintenance"}' WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
     const nullable = await client.query(`SELECT "targetDate", "calculationDetails" FROM "results" WHERE "id" = '00000000-0000-4000-8000-000000000003'`);
     if (nullable.rows[0].targetDate !== null || nullable.rows[0].calculationDetails?.projectionStatus !== "maintenance") {
       throw new Error("wellness v2 nullable result columns were not accepted");
+    }
+  });
+}
+
+async function verifyOwnershipRollback(database) {
+  await applyOldMigrations(database);
+  await withDatabase(database, async (client) => {
+    await client.query(`
+      INSERT INTO "users" ("id", "subscriptionStatus") VALUES
+        ('00000000-0000-4000-8000-000000000601', 'free'),
+        ('00000000-0000-4000-8000-000000000602', 'free');
+      INSERT INTO "subscriptions" ("id", "userId", "status") VALUES
+        ('00000000-0000-4000-8000-000000000611', '00000000-0000-4000-8000-000000000601', 'free'),
+        ('00000000-0000-4000-8000-000000000612', '00000000-0000-4000-8000-000000000602', 'free');
+      INSERT INTO "assessments" ("id", "userId", "gender", "goal", "age", "heightCm", "weightKg", "targetWeightKg", "activityLevel", "version", "updatedAt") VALUES
+        ('00000000-0000-4000-8000-000000000621', '00000000-0000-4000-8000-000000000601', 'female', 'lose_weight', 32, 165, 72, 62, 'light', 1, CURRENT_TIMESTAMP),
+        ('00000000-0000-4000-8000-000000000622', '00000000-0000-4000-8000-000000000602', 'female', 'lose_weight', 32, 165, 72, 62, 'light', 1, CURRENT_TIMESTAMP);
+      INSERT INTO "results" ("id", "userId", "bmiCategory", "bmi", "recommendedCalories", "targetDate") VALUES
+        ('00000000-0000-4000-8000-000000000631', '00000000-0000-4000-8000-000000000601', 'overweight', 26.4, 1467, CURRENT_TIMESTAMP);
+    `);
+    await client.query(consistencyMigration);
+    await client.query(wellnessMigration);
+    await client.query(`
+      UPDATE "results"
+      SET "assessmentId" = '00000000-0000-4000-8000-000000000622'
+      WHERE "id" = '00000000-0000-4000-8000-000000000631';
+    `);
+    await expectFailure(client.query(ownershipMigration), "results_assessmentId_userId_fkey");
+    await client.query("ROLLBACK");
+    const constraint = await client.query(`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'results_assessmentId_userId_fkey'
+      ) AS "ownerConstraint",
+      EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'results_assessmentId_userId_key'
+      ) AS "resultOwnerKey",
+      EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'results_assessmentId_userId_fkey'
+      ) AS "ownerForeignKey"
+    `);
+    if (constraint.rows[0].ownerConstraint || constraint.rows[0].resultOwnerKey || constraint.rows[0].ownerForeignKey) {
+      throw new Error("cross-user ownership migration left a partial constraint");
     }
   });
 }

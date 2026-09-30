@@ -7,12 +7,14 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
+    "verify": "npm run lint && npm test && npx tsc --noEmit",
     "test:migration": "node scripts/verify-migration.mjs",
     "test:http": "node scripts/http-smoke.mjs",
     "test:http:failure-cleanup": "node scripts/http-smoke-failure.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
-    "test:browser:failure-cleanup": "node scripts/browser-smoke-failure.mjs"
+    "test:browser:failure-cleanup": "node scripts/browser-smoke-failure.mjs",
+    "verify:all": "npm run verify && npm run test:migration && npm run build && npm run test:http && npm run test:http:failure-cleanup && npm run test:browser && npm run test:browser:failure-cleanup"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",

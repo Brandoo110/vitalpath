@@ -31,6 +31,9 @@ describe("submit, results and pay API", () => {
 
     expect(response.status).toBe(400);
     expect(body.error).toBe("bad_request");
+    expect(body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "version" }),
+    ]));
   });
 
   it("rejects_missing_required_health_fields", async () => {
@@ -61,6 +64,17 @@ describe("submit, results and pay API", () => {
       "targetWeightKg",
       "activityLevel",
     ]);
+    expect(body.issues).toEqual([
+      { field: "age", message: "This field is required" },
+      { field: "heightCm", message: "This field is required" },
+      { field: "weightKg", message: "This field is required" },
+      { field: "targetWeightKg", message: "This field is required" },
+      { field: "activityLevel", message: "This field is required" },
+      { field: "healthDataConsent", message: "This field is required" },
+      { field: "wellnessEligible", message: "This field is required" },
+    ]);
+    expect(body.nextStep).toBe(1);
+    expect(body.nextAction).toBe("continue_assessment");
 
     const resultCount = await prisma.result.count({ where: { userId: sessionId } });
     expect(resultCount).toBe(0);
@@ -110,6 +124,11 @@ describe("submit, results and pay API", () => {
 
     expect(rejected.status).toBe(422);
     expect(body.error).toBe("assessment_invalid");
+    expect(body.issues).toEqual([
+      expect.objectContaining({ field: "goal" }),
+    ]);
+    expect(body.nextStep).toBe(3);
+    expect(body.nextAction).toBe("review_assessment");
     const current = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
     expect(current.id).toBe(original.id);
     expect(current.sourceAssessmentVersion).toBe(1);
@@ -134,6 +153,69 @@ describe("submit, results and pay API", () => {
     const body = await response.json();
     expect(response.status).toBe(422);
     expect(body.error).toBe("assessment_invalid");
+    expect(body.issues).toEqual([
+      { field: "wellnessEligible", message: "Confirm this estimate applies to you before submitting" },
+    ]);
+    expect(body.nextStep).toBe(9);
+    expect(body.nextAction).toBe("continue_assessment");
+    expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(0);
+  });
+
+  it("maps_a_current_bmi_algorithm_error_to_the_body_step", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const patchResponse = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 2,
+      version: 1,
+      data: { weightKg: 49.5 },
+    }));
+    expect(patchResponse.status).toBe(200);
+
+    const response = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 2 }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(422);
+    expect(body).toMatchObject({
+      error: "assessment_invalid",
+      issues: [{ field: "assessment" }],
+      nextStep: 2,
+      nextAction: "review_assessment",
+    });
+  });
+
+  it("requires_explicit_health_data_consent_at_submit", async () => {
+    const sessionId = await createSessionId();
+    await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 9,
+      version: 0,
+      data: {
+        gender: "female",
+        goal: "lose_weight",
+        age: 32,
+        heightCm: 165,
+        weightKg: 72,
+        targetWeightKg: 62,
+        activityLevel: "light",
+        wellnessEligible: true,
+      },
+    }));
+
+    const response = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body).toMatchObject({
+      error: "assessment_invalid",
+      issues: [{ field: "healthDataConsent", message: "Health data consent is required before submitting" }],
+      nextStep: 9,
+      nextAction: "continue_assessment",
+    });
     expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(0);
   });
 
@@ -349,7 +431,12 @@ describe("submit, results and pay API", () => {
     expect(body.result).not.toHaveProperty("targetDate");
     expect(body.result).not.toHaveProperty("calculationDetails");
     expect(body.result).not.toHaveProperty("plan");
-    expect(body.lockedFields).toEqual(["recommendedCalories", "targetDate"]);
+    expect(body.report).toMatchObject({
+      id: expect.any(String),
+      calculatedAt: expect.any(String),
+      algorithmVersion: "wellness-v2",
+    });
+    expect(body.lockedFields).toEqual(["recommendedCalories", "targetDate", "calculationDetails"]);
     expect(body.lockedSections).toEqual([
       "weeklyWorkoutPlan",
       "nutritionPlan",
@@ -385,6 +472,12 @@ describe("submit, results and pay API", () => {
 
     expect(afterPayResponse.status).toBe(200);
     expect(afterPayBody.needPaywall).toBe(false);
+    expect(afterPayBody.report).toMatchObject({
+      id: expect.any(String),
+      calculatedAt: expect.any(String),
+      algorithmVersion: "wellness-v2",
+    });
+    expect(afterPayBody.lockedFields).toEqual([]);
     expect(afterPayBody.result).toMatchObject({
       bmi: 26.4,
       bmiCategory: "overweight",
@@ -416,6 +509,67 @@ describe("submit, results and pay API", () => {
       include: { subscription: true },
     });
     expect(user.subscription?.status).toBe("active");
+  });
+
+  it("keeps_reports_and_subscription_access_isolated_between_sessions", async () => {
+    const sessionA = await createSessionId();
+    const sessionB = await createSessionId();
+    await saveCompleteAssessment(sessionA);
+    await saveCompleteAssessment(sessionB);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId: sessionA, version: 1 }));
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId: sessionB, version: 1 }));
+
+    await pay(jsonRequest("POST", "/api/pay", { sessionId: sessionA, plan: "monthly" }));
+    const paidA = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionA}`));
+    const freeB = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionB}`));
+    expect(paidA.status).toBe(200);
+    expect((await paidA.json()).needPaywall).toBe(false);
+    expect(freeB.status).toBe(200);
+    expect((await freeB.json()).needPaywall).toBe(true);
+
+    await prisma.subscription.update({
+      where: { userId: sessionA },
+      data: { status: "free", plan: null, paidAt: null },
+    });
+    const revertedA = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionA}`));
+    expect(revertedA.status).toBe(200);
+    expect((await revertedA.json()).needPaywall).toBe(true);
+  });
+
+  it("allows_payment_before_submit_and_returns_the_paid_report_after_submit", async () => {
+    const sessionId = await createSessionId();
+    const payment = await pay(jsonRequest("POST", "/api/pay", { sessionId, plan: "quarterly" }));
+    expect(payment.status).toBe(200);
+
+    await saveCompleteAssessment(sessionId);
+    const submit = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    expect(submit.status).toBe(200);
+    const results = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionId}`));
+    expect(results.status).toBe(200);
+    expect((await results.json()).needPaywall).toBe(false);
+  });
+
+  it("replays_a_committed_submit_after_the_first_response_is_discarded", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+
+    const firstResponse = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    expect(firstResponse.status).toBe(200);
+    // Treat the successful upstream response as lost before the client reads it.
+    await firstResponse.arrayBuffer();
+
+    const replay = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }),
+    );
+    const replayBody = await replay.json();
+    const result = await prisma.result.findUniqueOrThrow({ where: { userId: sessionId } });
+    expect(replay.status).toBe(200);
+    expect(replayBody.resultId).toBe(result.id);
+    expect(await prisma.result.count({ where: { userId: sessionId } })).toBe(1);
   });
 
   it("keeps_pay_idempotent_for_active_session", async () => {

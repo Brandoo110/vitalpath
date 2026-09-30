@@ -59,15 +59,14 @@ try {
   await page.getByText("Setup failed", { exact: true }).waitFor();
   if ((await currentSessionId()) !== firstSessionId) throw new Error("bootstrap retry lost the session");
   await page.getByRole("button", { name: "Retry setup" }).click();
-  await page.getByRole("button", { name: "Start", exact: true }).waitFor();
+  await waitForRestoredLandingReady();
   await page.unroute("**/api/assessment?sessionId=*");
-  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await openRestoredFunnelAt("Which biological sex should we use for the estimate?");
 
   await page.getByRole("button", { name: /Female/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.reload({ waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "Start", exact: true }).click();
-  await page.getByRole("heading", { name: "How old are you?" }).waitFor();
+  await openRestoredFunnelAt("How old are you?");
   if ((await currentSessionId()) !== firstSessionId) throw new Error("reload changed the anonymous session");
 
   const ageInput = page.getByLabel("Age");
@@ -96,7 +95,7 @@ try {
   const conflictAssessment = await apiJson(page, `/api/assessment?sessionId=${firstSessionId}`);
   const conflictPatch = await apiJson(page, "/api/assessment", {
     method: "PATCH",
-    body: { sessionId: firstSessionId, step: 3, version: conflictAssessment.body.version, data: { goal: "lose_weight" } },
+    body: { sessionId: firstSessionId, step: 3, version: conflictAssessment.body.version, data: { goal: "get_toned" } },
   });
   if (conflictPatch.status !== 200) throw new Error(`conflict setup PATCH failed: ${JSON.stringify(conflictPatch)}`);
   await page.getByRole("button", { name: "Continue" }).click();
@@ -105,14 +104,66 @@ try {
     throw new Error("version conflict discarded the local goal draft");
   }
   await page.getByRole("button", { name: "Load saved answers and replace this draft" }).click();
-  await page.getByRole("heading", { name: "What result are you working toward?" }).waitFor();
+  await page.getByText("Saved answers loaded", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "How active are you right now?" }).waitFor();
+  const loadedAssessment = await apiJson(page, `/api/assessment?sessionId=${firstSessionId}`);
+  if (loadedAssessment.body.assessment?.goal !== "get_toned" || loadedAssessment.body.nextStep !== 5) {
+    throw new Error(`loading saved answers did not apply the authoritative goal/nextStep: ${JSON.stringify(loadedAssessment.body)}`);
+  }
 
-  await fillAssessment(page, true, true);
+  await fillAssessmentFromActivity(page);
   await page.getByRole("button", { name: "Generate my plan" }).click();
   await page.getByLabel("Save generated report").waitFor();
   await page.getByLabel("Name").fill("Browser Tester");
   await page.getByLabel("Email").fill("browser@example.com");
   await page.getByRole("button", { name: "View my report" }).click();
+  await page.getByRole("region", { name: "Payment offer" }).waitFor();
+  await page.getByText(/Model wellness-v2/).waitFor();
+
+  const droppedPatchSessionId = await prepareBlankSession(page);
+  await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), droppedPatchSessionId);
+  await page.reload({ waitUntil: "networkidle" });
+  await openRestoredFunnelAt("Which biological sex should we use for the estimate?");
+  let patchPosts = 0;
+  let droppedPatchBody;
+  await page.route("**/api/assessment*", async (route) => {
+    if (route.request().method() !== "PATCH") { await route.continue(); return; }
+    patchPosts += 1;
+    const response = await route.fetch();
+    droppedPatchBody = await response.json();
+    if (patchPosts === 1) { await route.abort("failed"); return; }
+    await route.fulfill({ response });
+  });
+  await page.getByRole("button", { name: /Female/ }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "How old are you?" }).waitFor();
+  if (patchPosts !== 1 || droppedPatchBody?.version !== 1) throw new Error("dropped PATCH response did not recover from one real upstream write");
+  await page.unroute("**/api/assessment*");
+
+  const droppedPaySessionId = await prepareSession(page, false);
+  await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), droppedPaySessionId);
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByRole("region", { name: "Payment offer" }).waitFor();
+  const payExitOffer = page.getByRole("dialog", { name: "Discount offer" });
+  if (await payExitOffer.isVisible().catch(() => false)) await payExitOffer.getByRole("button", { name: "Maybe later" }).click();
+  const payBodies = [];
+  await page.route("**/api/pay", async (route) => {
+    if (route.request().method() !== "POST") { await route.continue(); return; }
+    const response = await route.fetch();
+    const body = await response.json();
+    payBodies.push(body);
+    if (payBodies.length === 1) { await route.abort("failed"); return; }
+    await route.fulfill({ response });
+  });
+  await page.getByRole("button", { name: "Get my plan" }).first().click();
+  await page.getByText("Plan unlocked", { exact: true }).waitFor();
+  if (payBodies.length !== 2 || !payBodies[0].paidAt || payBodies[0].paidAt !== payBodies[1].paidAt || payBodies[0].plan !== "monthly" || payBodies[1].plan !== "monthly") {
+    throw new Error("dropped pay response did not replay the same monthly paidAt");
+  }
+  await page.getByText(/Model wellness-v2/).waitFor();
+  await page.unroute("**/api/pay");
+  await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), firstSessionId);
+  await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("region", { name: "Payment offer" }).waitFor();
 
   await page.getByRole("button", { name: /12-week plan/ }).click();
@@ -163,6 +214,72 @@ try {
   await page.getByRole("button", { name: "View my report" }).click();
   await page.getByText("Plan unlocked").waitFor();
 
+  const beforeCancel = await apiJson(page, `/api/assessment?sessionId=${firstSessionId}`);
+  await page.getByRole("button", { name: "Edit answers" }).click();
+  await page.getByRole("heading", { name: "Which biological sex" }).waitFor();
+  await page.getByText("Male", { exact: true }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("heading", { name: "How old are you?" }).waitFor();
+  let abortCancelOnce = true;
+  await page.route("**/api/assessment?sessionId=*", async (route) => {
+    if (abortCancelOnce) { abortCancelOnce = false; await route.abort("failed"); return; }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Cancel editing" }).click();
+  await page.getByText(/draft is still here/i).waitFor();
+  await page.unroute("**/api/assessment?sessionId=*");
+  await page.getByRole("button", { name: "Cancel editing" }).click();
+  await page.getByRole("heading", { name: /personalized plan/i }).waitFor();
+  const afterCancel = await apiJson(page, `/api/assessment?sessionId=${firstSessionId}`);
+  if (afterCancel.body.version !== beforeCancel.body.version || afterCancel.body.assessment?.gender !== beforeCancel.body.assessment?.gender) {
+    throw new Error("cancel editing changed the saved report after a failed refresh");
+  }
+
+  const partialSessionId = await prepareDraftSession(page, {
+    gender: "female", goal: "lose_weight", age: 32, heightCm: 165, weightKg: 72, targetWeightKg: 62,
+  });
+  await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), partialSessionId);
+  await page.reload({ waitUntil: "networkidle" });
+  await openRestoredFunnelAt("How active are you right now?");
+  await fillRequiredFromActivity(page);
+  await page.getByRole("button", { name: "Generate my plan" }).click();
+  await page.getByLabel("Save generated report").waitFor();
+  await page.getByLabel("Name").fill("Optional Skip Tester");
+  await page.getByLabel("Email").fill("optional@example.com");
+  await page.getByRole("button", { name: "View my report" }).click();
+  await page.getByText(/Model wellness-v2/).waitFor();
+
+  const unsupportedCases = [
+    { name: "age", overrides: { age: 19 }, heading: "How old are you?", field: "Age", message: /age must be between 20 and 78/i, value: "19" },
+    { name: "target BMI", overrides: { targetWeightKg: 49 }, heading: /Add your current and target body metrics/, field: "Target weight", message: /target BMI is outside/i, value: "49" },
+  ];
+  for (const unsupported of unsupportedCases) {
+    const unsupportedSessionId = await prepareDraftSession(page, {
+      gender: "female", goal: "lose_weight", age: 32, heightCm: 165, weightKg: 72, targetWeightKg: 62,
+      activityLevel: "light", healthDataConsent: true, wellnessEligible: true, ...unsupported.overrides,
+    });
+    await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), unsupportedSessionId);
+    await page.reload({ waitUntil: "networkidle" });
+    await openRestoredFunnelAt("What usually gets in the way?");
+    await page.getByRole("button", { name: "Generate my plan" }).click();
+    await page.getByRole("heading", { name: unsupported.heading }).waitFor();
+    await page.getByText(unsupported.message).waitFor();
+    if (await page.getByLabel(unsupported.field).inputValue() !== unsupported.value) {
+      throw new Error(`${unsupported.name} 422 recovery did not preserve the invalid value for correction`);
+    }
+    if (unsupported.name === "age") {
+      await page.getByLabel("Age").fill("32");
+      await page.getByRole("button", { name: "Continue" }).click();
+      for (let step = 0; step < 7; step += 1) await page.getByRole("button", { name: "Continue" }).click();
+      await page.getByRole("button", { name: "Generate my plan" }).click();
+      await page.getByLabel("Save generated report").waitFor();
+      await page.getByLabel("Name").fill("Recovered Age Tester");
+      await page.getByLabel("Email").fill("recovered-age@example.com");
+      await page.getByRole("button", { name: "View my report" }).click();
+      await page.getByText(/Model wellness-v2/).waitFor();
+    }
+  }
+
   const expiredSessionId = await prepareSession(page, true);
   await databaseQuery('UPDATE "results" SET "algorithmVersion" = $1 WHERE "userId" = $2', ["wellness-v1", expiredSessionId]);
   await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), expiredSessionId);
@@ -180,6 +297,8 @@ try {
     await page.evaluate((sessionId) => window.localStorage.setItem("vitalpath-session-id", sessionId), id);
     await page.reload({ waitUntil: "networkidle" });
     await page.getByRole("region", { name: "Payment offer" }).waitFor();
+    const exitOffer = page.getByRole("dialog", { name: "Discount offer" });
+    if (await exitOffer.isVisible().catch(() => false)) await exitOffer.getByRole("button", { name: "Maybe later" }).click();
     await page.getByRole("button", { name: testCase.planLabel }).click();
     let postedPlan;
     const capturePay = (request) => { if (request.url().endsWith("/api/pay") && request.method() === "POST") postedPlan = request.postDataJSON()?.plan; };
@@ -212,23 +331,7 @@ try {
   }
 }
 
-async function fillAssessment(currentPage, skipAge = false, bodyAlreadyResolved = false) {
-  if (!skipAge) {
-    await currentPage.getByLabel("Age").fill("32");
-    await currentPage.getByRole("button", { name: "Continue" }).click();
-  }
-  if (!bodyAlreadyResolved) {
-    await currentPage.getByLabel("Height").fill("165");
-    await currentPage.getByLabel("Current weight").fill("72");
-    await currentPage.getByLabel("Target weight").fill("62");
-    await currentPage.getByRole("button", { name: "Continue" }).click();
-  }
-  await currentPage.getByRole("button", { name: /Keep fit/ }).click();
-  await currentPage.getByText(/Keep fit uses an equal target weight/).waitFor();
-  await currentPage.getByRole("button", { name: /Lose weight/ }).click();
-  await currentPage.getByRole("button", { name: "Continue" }).click();
-  await currentPage.getByRole("button", { name: "Standard" }).click();
-  await currentPage.getByRole("button", { name: "Continue" }).click();
+async function fillAssessmentFromActivity(currentPage) {
   await currentPage.getByRole("button", { name: /Light/ }).click();
   await currentPage.getByRole("button", { name: "Continue" }).click();
   await currentPage.getByRole("button", { name: /4 days/ }).click();
@@ -243,6 +346,36 @@ async function fillAssessment(currentPage, skipAge = false, bodyAlreadyResolved 
   await currentPage.getByRole("button", { name: /No time/ }).click();
   await currentPage.getByText("I agree to use my health data.").click();
   await currentPage.getByText("I confirm this estimate applies to me.").click();
+}
+
+async function fillRequiredFromActivity(currentPage) {
+  await currentPage.getByRole("button", { name: /Light/ }).click();
+  await currentPage.getByRole("button", { name: "Continue" }).click();
+  await currentPage.getByRole("button", { name: "Continue" }).click();
+  await currentPage.getByRole("button", { name: "Continue" }).click();
+  await currentPage.getByRole("button", { name: "Continue" }).click();
+  await currentPage.getByText("I agree to use my health data.").click();
+  await currentPage.getByText("I confirm this estimate applies to me.").click();
+}
+
+async function prepareDraftSession(currentPage, data) {
+  const created = await apiJson(currentPage, "/api/sessions", { method: "POST", body: {} });
+  if (created.status !== 201) throw new Error(`draft session failed: ${JSON.stringify(created)}`);
+  const id = created.body.sessionId;
+  createdSessionIds.add(id);
+  const saved = await apiJson(currentPage, "/api/assessment", {
+    method: "PATCH",
+    body: { sessionId: id, step: 10, version: 0, data },
+  });
+  if (saved.status !== 200) throw new Error(`draft assessment failed: ${JSON.stringify(saved)}`);
+  return id;
+}
+
+async function prepareBlankSession(currentPage) {
+  const created = await apiJson(currentPage, "/api/sessions", { method: "POST", body: {} });
+  if (created.status !== 201) throw new Error(`blank session failed: ${JSON.stringify(created)}`);
+  createdSessionIds.add(created.body.sessionId);
+  return created.body.sessionId;
 }
 
 async function prepareSession(currentPage, paid) {
@@ -290,6 +423,26 @@ async function recordCurrentSession() {
 
 async function currentSessionId() {
   return page.evaluate(() => window.localStorage.getItem("vitalpath-session-id"));
+}
+
+async function waitForStartReady() {
+  const start = page.getByRole("button", { name: "Start", exact: true });
+  await start.waitFor();
+  await page.waitForFunction(() => {
+    const button = document.querySelector('button[aria-label="Start"]');
+    return button instanceof HTMLButtonElement && !button.disabled;
+  });
+}
+
+async function waitForRestoredLandingReady() {
+  await page.getByText("Start fresh as a new user", { exact: true }).waitFor();
+  await waitForStartReady();
+}
+
+async function openRestoredFunnelAt(headingName) {
+  await waitForRestoredLandingReady();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await page.getByRole("heading", { name: headingName }).waitFor();
 }
 
 async function databaseQuery(text, values = []) {

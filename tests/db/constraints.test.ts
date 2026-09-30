@@ -51,6 +51,24 @@ describe("database consistency constraints", () => {
       }),
     ).rejects.toThrow();
   });
+
+  it("prevents_a_result_from_crossing_user_assessment_ownership", async () => {
+    const owner = await createUser();
+    const other = await createUser();
+    const assessment = await prisma.assessment.create({ data: { userId: other.id } });
+
+    await expect(
+      prisma.result.create({
+        data: {
+          userId: owner.id,
+          assessmentId: assessment.id,
+          bmi: 22,
+          bmiCategory: "normal",
+          recommendedCalories: 1800,
+        },
+      }),
+    ).rejects.toThrow();
+  });
 });
 
 async function createUser() {
