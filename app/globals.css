@@ -1,21 +1,21 @@
 @import "tailwindcss";
 
 :root {
-  --page: #f5f5f7;
-  --ink: #1d1d1f;
-  --muted: #6e6e73;
-  --hint: #86868b;
-  --green: #007aff;
-  --green-dark: #005ecb;
-  --gold: #007aff;
+  --page: #f7f8f2;
+  --ink: #263d33;
+  --muted: #636f66;
+  --hint: #737e73;
+  --green: #315347;
+  --green-dark: #243e32;
+  --gold: #315347;
   --line: rgba(60, 60, 67, 0.16);
-  --selected: #e9f3ff;
+  --selected: #e8eee2;
   --white: #ffffff;
-  --coral: #007aff;
-  --warning-ink: #6e6e73;
-  --warning-bg: #f2f2f7;
-  --locked: #f2f2f7;
-  --lock-ink: #8e8e93;
+  --coral: #315347;
+  --warning-ink: #636f66;
+  --warning-bg: #edf0e8;
+  --locked: #edf0e8;
+  --lock-ink: #6c766d;
 }
 
 @theme inline {
@@ -64,7 +64,7 @@ button {
 button:focus-visible,
 input:focus-visible,
 summary:focus-visible {
-  outline: 3px solid rgba(0, 122, 255, 0.35);
+  outline: 3px solid rgba(49, 83, 71, 0.35);
   outline-offset: 2px;
 }
 
@@ -435,7 +435,7 @@ p {
 }
 
 .option-card:hover:not(:disabled) {
-  border-color: rgba(0, 122, 255, 0.42);
+  border-color: rgba(49, 83, 71, 0.42);
 }
 
 .option-card.selected {
@@ -467,7 +467,7 @@ p {
 .radio-dot {
   width: 21px;
   height: 21px;
-  border: 1.5px solid #8e8e93;
+  border: 1.5px solid #6c766d;
   border-radius: 50%;
   background: var(--white);
 }
@@ -498,7 +498,7 @@ p {
 .number-input-wrap:focus-within,
 .text-field input:focus {
   border-color: var(--green);
-  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.16);
+  box-shadow: 0 0 0 3px rgba(49, 83, 71, 0.16);
 }
 
 .number-input-wrap input,
@@ -596,7 +596,7 @@ p {
   height: 38px;
   border-radius: inherit;
   background: var(--green);
-  box-shadow: 0 0 0 10px rgba(0, 122, 255, 0.1);
+  box-shadow: 0 0 0 10px rgba(49, 83, 71, 0.1);
 }
 
 .generation-steps,
@@ -625,7 +625,7 @@ p {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(0, 122, 255, 0.12), transparent);
+  background: linear-gradient(90deg, transparent, rgba(49, 83, 71, 0.12), transparent);
   transform: translateX(-100%);
   animation: report-sweep 1.35s ease-in-out infinite;
 }
@@ -655,9 +655,9 @@ p {
 }
 
 .form-hint {
-  border: 1px solid rgba(0, 122, 255, 0.2);
+  border: 1px solid rgba(49, 83, 71, 0.2);
   background: #eef6ff;
-  color: #005ecb;
+  color: #243e32;
 }
 
 .action-stack {
@@ -966,7 +966,7 @@ p {
 }
 
 .price-tier:hover {
-  border-color: rgba(0, 122, 255, 0.42);
+  border-color: rgba(49, 83, 71, 0.42);
 }
 
 .price-tier.selected {
@@ -1025,7 +1025,7 @@ p {
   justify-self: end;
   border-radius: 999px;
   padding: 3px 8px;
-  background: rgba(0, 122, 255, 0.1);
+  background: rgba(49, 83, 71, 0.1);
   color: var(--green-dark);
   font-size: 11px;
   font-weight: 780;
@@ -1035,7 +1035,7 @@ p {
   grid-area: radio;
   width: 20px;
   height: 20px;
-  border: 1.5px solid #8e8e93;
+  border: 1.5px solid #6c766d;
   border-radius: 50%;
 }
 
@@ -1168,7 +1168,7 @@ p {
 .unlocked-card {
   display: grid;
   gap: 16px;
-  border: 1px solid rgba(0, 122, 255, 0.18);
+  border: 1px solid rgba(49, 83, 71, 0.18);
   border-radius: 18px;
   padding: 20px;
   margin: 28px 0;
@@ -1207,7 +1207,7 @@ p {
 .unlocked-stats > div {
   display: grid;
   gap: 4px;
-  border: 1px solid rgba(0, 122, 255, 0.16);
+  border: 1px solid rgba(49, 83, 71, 0.16);
   border-radius: 14px;
   padding: 14px;
   background: rgba(255, 255, 255, 0.55);
@@ -1424,8 +1424,8 @@ p {
 }
 
 .plan-block.preview-open {
-  border-color: rgba(0, 122, 255, 0.22);
-  background: linear-gradient(180deg, #ffffff 0%, rgba(233, 243, 255, 0.58) 100%);
+  border-color: rgba(49, 83, 71, 0.22);
+  background: linear-gradient(180deg, #ffffff 0%, rgba(232, 238, 226, 0.58) 100%);
 }
 
 .plan-block.locked-plan-block {
@@ -1478,7 +1478,7 @@ p {
   margin-left: auto;
   border-radius: 999px;
   padding: 3px 8px;
-  background: rgba(0, 122, 255, 0.1);
+  background: rgba(49, 83, 71, 0.1);
   color: var(--green-dark);
   font-size: 10.5px;
   font-style: normal;
@@ -1491,11 +1491,11 @@ p {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  border: 1px dashed rgba(0, 122, 255, 0.4);
+  border: 1px dashed rgba(49, 83, 71, 0.4);
   border-radius: 16px;
   padding: 18px 20px;
   margin-top: 0;
-  background: rgba(233, 243, 255, 0.72);
+  background: rgba(232, 238, 226, 0.72);
   color: var(--green-dark);
   font-size: 15px;
   font-weight: 800;

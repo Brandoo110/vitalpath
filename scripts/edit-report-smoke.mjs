@@ -35,6 +35,10 @@ try {
     if (request.url().endsWith("/api/assessment/submit") && request.method() === "POST") submitRequests += 1;
   });
 
+  if (process.env.EDIT_REPORT_SCREENSHOT) {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.screenshot({ path: process.env.EDIT_REPORT_SCREENSHOT, fullPage: true });
+  }
   const before = await api(`/api/assessment?sessionId=${sessionId}`);
   const beforeResults = await api(`/api/results?sessionId=${sessionId}`);
   const originalWeight = before.body.assessment.weightKg;

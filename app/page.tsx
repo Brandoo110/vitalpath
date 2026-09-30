@@ -932,33 +932,19 @@ export default function Home() {
 
   if (view === "landing") {
     return (
-      <main className="page-frame landing-frame">
-        <section className="landing">
-          <p className="wordmark">VitalPath</p>
-          <p className="eyebrow">Personalized in minutes</p>
-          <h1>Build a health plan that fits your body and your week.</h1>
-          <p className="landing-sub">
-            Answer a few quick questions about your goals, body and routine. We calculate your BMI,
-            daily calorie guidance and a scenario outcome, then build a workout, nutrition and
-            recovery plan around them.
-          </p>
-          <ul className="landing-points">
-            <li>
-              <strong>Personalized</strong>
-              Plan adapts to your goal, pace and weekly schedule.
-            </li>
-            <li>
-              <strong>Science-based</strong>
-              Mifflin-St Jeor, BMI and a fixed activity multiplier are applied consistently on the server.
-            </li>
-            <li>
-              <strong>Saved as you go</strong>
-              Every step is stored, so you can pick up where you left off.
-            </li>
-          </ul>
-          <div className="landing-actions">
+      <main className="editorial-landing">
+        <header className="editorial-header">
+          <p className="wordmark">VitalPath<span className="brand-leaf" aria-hidden="true">↗</span></p>
+          <span className="header-note">A little more you.</span>
+        </header>
+        <section className="landing-composition" aria-label="Your path to wellbeing">
+          <div className="landing-story">
+            <p className="editorial-kicker">Wellbeing, made personal.</p>
+            <h1>A healthier life.<br /><em>At your pace.</em></h1>
+            <p className="landing-deck">A considered plan for how you move, eat and recover. Built around your body. Made for your everyday.</p>
+            <div className="landing-actions">
             {results ? (
-              <button className="primary-button" type="button" onClick={() => setView("results")}>
+              <button className="primary-button" type="button" aria-label="View my plan" onClick={() => setView("results")}>
                 View my plan
               </button>
             ) : (
@@ -966,6 +952,7 @@ export default function Home() {
                 className="primary-button"
                 type="button"
                 disabled={busy || !sessionId}
+                aria-label={busy ? "Preparing…" : "Start"}
                 onClick={() => setView("funnel")}
               >
                 {busy ? "Preparing…" : "Start"}
@@ -976,8 +963,19 @@ export default function Home() {
                 Start fresh as a new user
               </button>
             ) : null}
+            </div>
           </div>
+          <figure className="landing-landscape">
+            <div className="landscape-photo" role="img" aria-label="Morning light falling through a quiet green forest" />
+            <figcaption><span>Room to grow.</span><span>One day at a time.</span></figcaption>
+          </figure>
         </section>
+        <section className="landing-approach" aria-labelledby="approach-title">
+          <div><p className="editorial-kicker">A plan that fits</p><h2 id="approach-title">Your life comes first.</h2></div>
+          <p>Start with a few questions about your body, your goals and your week. We turn your answers into a practical starting point you can come back to.</p>
+          <ul><li>Movement that fits your schedule</li><li>Nutrition with a clear direction</li><li>Space for rest and recovery</li></ul>
+        </section>
+        <footer className="editorial-footer"><span>VitalPath · Personal wellbeing</span><span>A planning aid, not medical advice.</span></footer>
       </main>
     );
   }
@@ -1065,7 +1063,7 @@ export default function Home() {
     const projectionStatus = results.result.calculationDetails?.projectionStatus;
 
     return (
-      <main className="page-frame results-frame">
+      <main className="page-frame results-frame editorial-results">
         <header className="result-topbar">
           <p className="wordmark">VitalPath</p>
           <div className="result-topbar-right">
@@ -1107,7 +1105,7 @@ export default function Home() {
             </p>
           </div>
 
-          <h2 className="section-title">Your health snapshot</h2>
+          <div className="report-section-heading"><span>01 / The starting point</span><h2 className="section-title">Your health snapshot</h2></div>
           <div className="bento-grid">
             <div className="bento-cell bento-projection">
               <div className="bento-label">
@@ -1158,6 +1156,7 @@ export default function Home() {
             </div>
           </div>
 
+          <div className="report-section-heading"><span>02 / Your everyday</span><h2 className="section-title">Small steps. A clear direction.</h2></div>
           <PlanSections results={results} onUnlock={() => unlockPlan(selectedPlan)} busy={busy} />
 
           <MilestoneTimeline targetDate={targetDate} projectionStatus={projectionStatus} />
@@ -1217,8 +1216,8 @@ export default function Home() {
   }
 
   return (
-    <main className="page-frame">
-      <section className="app-card funnel-card" aria-label="Health assessment">
+    <main className="editorial-funnel">
+      <section className="funnel-card" aria-label="Health assessment">
         <div className="brand-row">
           <p className="wordmark">VitalPath</p>
           <span className="status-pill">{status}</span>
@@ -1234,12 +1233,17 @@ export default function Home() {
           <span style={{ width: `${progressPercent}%` }} />
         </div>
 
+        <div className="question-layout">
+        <div className="question-story">
+        <p className="chapter-number" aria-hidden="true">{String(activeStep + 1).padStart(2, "0")}<span> / {questionSteps.length}</span></p>
         <div className="question-copy">
           <p className="eyebrow">{currentStep.eyebrow}</p>
           <h1>{currentStep.title}</h1>
           <p>{currentStep.description}</p>
         </div>
 
+        </div>
+        <div className="question-response">
         <fieldset className="form-fieldset" disabled={busy || savedChangesPending !== null}>
           <StepFields step={activeStep} form={form} updateField={updateField} />
         </fieldset>
@@ -1283,6 +1287,9 @@ export default function Home() {
             Back
           </button>
         </div>
+        </div>
+        </div>
+        <footer className="question-footer"><span>Your pace. Your path.</span><span>{editing ? "Changes stay in draft until you update your plan." : "Your answers are saved as you continue."}</span></footer>
       </section>
     </main>
   );
@@ -1640,21 +1647,21 @@ function WeightProjection({
       <svg className="weight-curve" viewBox="0 0 520 170" role="img" aria-label="Weight projection curve">
         <defs>
           <linearGradient id="wcFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#007aff" stopOpacity="0.16" />
-            <stop offset="1" stopColor="#007aff" stopOpacity="0" />
+            <stop offset="0" stopColor="#315347" stopOpacity="0.16" />
+            <stop offset="1" stopColor="#315347" stopOpacity="0" />
           </linearGradient>
         </defs>
         <path d={fillPath} fill="url(#wcFill)" />
         <path
           d={curvePath}
           fill="none"
-          stroke="#007aff"
+          stroke="#315347"
           strokeLinecap="round"
           strokeWidth="2.5"
           strokeDasharray="4 0"
         />
-        <circle cx="14" cy={startY} r="5" fill="#007aff" />
-        <circle cx="506" cy={endY} r="6" fill="#007aff" stroke="#f5f5f7" strokeWidth="3" />
+        <circle cx="14" cy={startY} r="5" fill="#315347" />
+        <circle cx="506" cy={endY} r="6" fill="#315347" stroke="#f7f8f2" strokeWidth="3" />
         <text x="20" y={labelY} fill="#8a8474" fontSize="12">
           Now · {currentLabel}
         </text>
