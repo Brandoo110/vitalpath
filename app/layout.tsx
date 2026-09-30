@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Health Funnel",
+  title: "VitalPath",
   description: "A wheel-based health assessment funnel with paywalled plan results.",
 };
 

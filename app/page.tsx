@@ -891,7 +891,7 @@ export default function Home() {
     return (
       <main className="page-frame">
         <section className="app-card setup-card">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <p className="eyebrow">Setup failed</p>
           <h1>We could not start your assessment.</h1>
           <p className="support-copy">
@@ -915,7 +915,7 @@ export default function Home() {
     return (
       <main className="page-frame">
         <section className="app-card generating-card" aria-label="Restoring assessment">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <div className="loader-ring" aria-hidden="true">
             <span />
           </div>
@@ -934,7 +934,7 @@ export default function Home() {
     return (
       <main className="page-frame landing-frame">
         <section className="landing">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <p className="eyebrow">Personalized in minutes</p>
           <h1>Build a health plan that fits your body and your week.</h1>
           <p className="landing-sub">
@@ -986,7 +986,7 @@ export default function Home() {
     return (
       <main className="page-frame">
         <section className="app-card generating-card" aria-label="Generating report">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <div className="loader-ring" aria-hidden="true">
             <span />
           </div>
@@ -1010,7 +1010,7 @@ export default function Home() {
     return (
       <main className="page-frame">
         <section className="app-card lead-card" aria-label="Save generated report">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <p className="eyebrow">Report generated</p>
           <h1>Your plan is ready. Where should we save it?</h1>
           <p className="support-copy">
@@ -1067,7 +1067,7 @@ export default function Home() {
     return (
       <main className="page-frame results-frame">
         <header className="result-topbar">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <div className="result-topbar-right">
             {locked && !paymentConfirmed ? (
               <DiscountTimer seconds={countdownSeconds} />
@@ -1220,7 +1220,7 @@ export default function Home() {
     <main className="page-frame">
       <section className="app-card funnel-card" aria-label="Health assessment">
         <div className="brand-row">
-          <p className="wordmark">Better Health Plan</p>
+          <p className="wordmark">VitalPath</p>
           <span className="status-pill">{status}</span>
         </div>
 
@@ -1640,21 +1640,21 @@ function WeightProjection({
       <svg className="weight-curve" viewBox="0 0 520 170" role="img" aria-label="Weight projection curve">
         <defs>
           <linearGradient id="wcFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#2c4a3b" stopOpacity="0.16" />
-            <stop offset="1" stopColor="#2c4a3b" stopOpacity="0" />
+            <stop offset="0" stopColor="#007aff" stopOpacity="0.16" />
+            <stop offset="1" stopColor="#007aff" stopOpacity="0" />
           </linearGradient>
         </defs>
         <path d={fillPath} fill="url(#wcFill)" />
         <path
           d={curvePath}
           fill="none"
-          stroke="#2c4a3b"
+          stroke="#007aff"
           strokeLinecap="round"
           strokeWidth="2.5"
           strokeDasharray="4 0"
         />
-        <circle cx="14" cy={startY} r="5" fill="#2c4a3b" />
-        <circle cx="506" cy={endY} r="6" fill="#c9a24b" stroke="#faf6ef" strokeWidth="3" />
+        <circle cx="14" cy={startY} r="5" fill="#007aff" />
+        <circle cx="506" cy={endY} r="6" fill="#007aff" stroke="#f5f5f7" strokeWidth="3" />
         <text x="20" y={labelY} fill="#8a8474" fontSize="12">
           Now · {currentLabel}
         </text>
