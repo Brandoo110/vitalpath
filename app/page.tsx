@@ -131,6 +131,15 @@ type ResultsResponse = {
   };
 };
 
+type EditBaseline = {
+  version: number;
+};
+
+type SavedChangesPending = {
+  version: number;
+  phase: "submit" | "results";
+};
+
 type ProjectionStatus = "projected" | "not_projected" | "maintenance";
 
 type QuestionStep = {
@@ -287,6 +296,9 @@ export default function Home() {
   const [exitOfferSeen, setExitOfferSeen] = useState(false);
   const [sessionWasRestored, setSessionWasRestored] = useState(false);
   const [conflictPending, setConflictPending] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editBaseline, setEditBaseline] = useState<EditBaseline | null>(null);
+  const [savedChangesPending, setSavedChangesPending] = useState<SavedChangesPending | null>(null);
   const [countdownSeconds, setCountdownSeconds] = useState(9 * 60 + 42);
 
   const currentStep = questionSteps[activeStep];
@@ -385,6 +397,9 @@ export default function Home() {
       setSelectedPlan("monthly");
       setPaymentConfirmed(false);
       setConflictPending(false);
+      setEditing(false);
+      setEditBaseline(null);
+      setSavedChangesPending(null);
       // 第一次进入时虽然会写 localStorage，但不把它当成“可重新开始”的旧会话。
       setSessionWasRestored(false);
       const restoredCompleted = await restoreAssessment(nextSessionId, false, false);
@@ -454,6 +469,17 @@ export default function Home() {
       return;
     }
 
+    if (editing) {
+      if (activeStep < questionSteps.length - 1) {
+        setError(null);
+        setActiveStep((step) => step + 1);
+        setStatus("Draft updated");
+        return;
+      }
+      await saveEditedPlan();
+      return;
+    }
+
     try {
       setBusy(true);
       setError(null);
@@ -490,6 +516,163 @@ export default function Home() {
       if (caught instanceof ApiClientError && caught.code === "version_conflict") {
         setConflictPending(true);
         setError("Your saved answers changed elsewhere. Your current draft is preserved.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function beginEditing() {
+    if (!results || busy) return;
+    setEditBaseline({ version });
+    setEditing(true);
+    setConflictPending(false);
+    setError(null);
+    setActiveStep(0);
+    setView("funnel");
+    setStatus("Editing your answers");
+  }
+
+  async function saveEditedPlan() {
+    if (!sessionId || busy || !editBaseline) return;
+
+    const allErrors = questionSteps.flatMap((_, step) => validateStep(step, form));
+    if (allErrors.length > 0) {
+      const firstInvalidStep = questionSteps.findIndex((_, step) => validateStep(step, form).length > 0);
+      setActiveStep(firstInvalidStep === -1 ? activeStep : firstInvalidStep);
+      setError(allErrors[0]);
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setError(null);
+      setStatus("Saving updated answers");
+      const data = questionSteps.reduce<AssessmentPayload>(
+        (payload, _, step) => ({ ...payload, ...payloadForStep(step, form) }),
+        {},
+      );
+      const response = await fetch("/api/assessment", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          step: questionSteps.length,
+          version: editBaseline.version,
+          data,
+        }),
+      });
+      const body = await readBody<{ step: number; version: number; completed: boolean }>(response);
+
+      setVersion(body.version);
+      setServerStep(body.step);
+      setResults(null);
+      setEditing(false);
+      setEditBaseline(null);
+      setSavedChangesPending({ version: body.version, phase: "submit" });
+      setStatus("Generating updated plan");
+      try {
+        await submitEditedPlan(body.version);
+        setSavedChangesPending(null);
+        setStatus("Plan updated");
+      } catch (caught) {
+        setError(`Your answers were saved, but the updated plan could not be generated. Retry to continue. ${messageFrom(caught)}`);
+        setStatus("Plan update needs retry");
+        setView("funnel");
+      }
+    } catch (caught) {
+      setError(messageFrom(caught));
+      setStatus("Save failed");
+      if (caught instanceof ApiClientError && caught.code === "version_conflict") {
+        setConflictPending(true);
+        setError("Your saved answers changed elsewhere. Your current draft is preserved.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retrySavedPlan() {
+    if (!sessionId || busy || savedChangesPending === null) return;
+    try {
+      setBusy(true);
+      setError(null);
+      setStatus("Generating updated plan");
+      if (savedChangesPending.phase === "submit") {
+        await submitEditedPlan(savedChangesPending.version);
+      } else {
+        setGenerating(true);
+        try {
+          await loadResults(sessionId, true);
+        } finally {
+          setGenerating(false);
+        }
+      }
+      setSavedChangesPending(null);
+      setStatus("Plan updated");
+    } catch (caught) {
+      setError(`Your answers are saved, but the updated plan is still unavailable. Retry again. ${messageFrom(caught)}`);
+      setStatus("Plan update needs retry");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitEditedPlan(nextVersion: number) {
+    setGenerating(true);
+    try {
+      const response = await fetch("/api/assessment/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, version: nextVersion }),
+      });
+      await readBody<{ ok: true; resultId: string }>(response);
+      setSavedChangesPending({ version: nextVersion, phase: "results" });
+      await loadResults(sessionId, true);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function cancelEditing() {
+    if (!sessionId || busy || !editBaseline) return;
+
+    try {
+      setBusy(true);
+      setError(null);
+      setStatus("Checking saved plan");
+      const assessmentResponse = await fetch(`/api/assessment?sessionId=${encodeURIComponent(sessionId)}`);
+      const assessment = await readBody<AssessmentResponse>(assessmentResponse);
+      const resultsResponse = await fetch(`/api/results?sessionId=${encodeURIComponent(sessionId)}`);
+      const latestResults = await readBody<ResultsResponse>(resultsResponse);
+
+      setVersion(assessment.version);
+      setServerStep(assessment.step);
+      setForm(formFromAssessment(assessment));
+      setResults(latestResults);
+      setEditing(false);
+      setEditBaseline(null);
+      setConflictPending(false);
+      setPaymentConfirmed(false);
+      setView("results");
+      setStatus(assessment.version === editBaseline.version ? "Back to plan" : "Latest plan loaded");
+    } catch (caught) {
+      if (isResultRecoveryError(caught)) {
+        setResults(null);
+        try {
+          await restoreAssessment(sessionId, false, false, false);
+          setEditing(false);
+          setEditBaseline(null);
+          setView("funnel");
+          setError("Your saved plan changed elsewhere. Review the latest answers before continuing.");
+          setStatus("Plan needs review");
+        } catch (refreshError) {
+          setError(`We could not refresh your saved plan. Your draft is still here. ${messageFrom(refreshError)}`);
+          setStatus("Refresh failed");
+        }
+      } else {
+        setError(`We could not verify the saved plan. Your draft is still here. ${messageFrom(caught)}`);
+        setStatus("Cancel needs retry");
       }
     } finally {
       setBusy(false);
@@ -644,7 +827,23 @@ export default function Home() {
     try {
       setBusy(true);
       setError(null);
-      await restoreAssessment(sessionId, false, false, false);
+      if (editing) {
+        const assessmentResponse = await fetch(`/api/assessment?sessionId=${encodeURIComponent(sessionId)}`);
+        const assessment = await readBody<AssessmentResponse>(assessmentResponse);
+        const nextForm = formFromAssessment(assessment);
+        let latestResults = results;
+        if (assessment.completed) {
+          const resultsResponse = await fetch(`/api/results?sessionId=${encodeURIComponent(sessionId)}`);
+          latestResults = await readBody<ResultsResponse>(resultsResponse);
+        }
+        setVersion(assessment.version);
+        setServerStep(assessment.step);
+        setForm(nextForm);
+        setResults(latestResults);
+        setEditBaseline({ version: assessment.version });
+      } else {
+        await restoreAssessment(sessionId, false, false, false);
+      }
       setConflictPending(false);
       setStatus("Saved answers loaded");
     } catch (caught) {
@@ -673,6 +872,9 @@ export default function Home() {
     setSelectedPlan("monthly");
     setPaymentConfirmed(false);
     setConflictPending(false);
+    setEditing(false);
+    setEditBaseline(null);
+    setSavedChangesPending(null);
     setSessionWasRestored(false);
     window.sessionStorage.removeItem(exitOfferStorageKey);
     setView("bootstrapping");
@@ -884,10 +1086,15 @@ export default function Home() {
                 Retry report
               </button>
             ) : (
-              <button className="text-button" type="button" onClick={() => setView("funnel")}>
+              <button className="text-button" type="button" disabled={busy} onClick={beginEditing}>
                 Edit answers
               </button>
             )}
+            {locked && !paymentConfirmed ? (
+              <button className="text-button" type="button" disabled={busy} onClick={beginEditing}>
+                Edit answers
+              </button>
+            ) : null}
           </div>
         </header>
 
@@ -983,7 +1190,7 @@ export default function Home() {
           {error ? <div className="form-error">{error}</div> : null}
 
           <footer className="result-footer">
-            <button className="text-button" type="button" onClick={() => setView("funnel")}>
+            <button className="text-button" type="button" disabled={busy} onClick={beginEditing}>
               Back to answers
             </button>
             {locked && !paymentConfirmed ? (
@@ -1033,7 +1240,7 @@ export default function Home() {
           <p>{currentStep.description}</p>
         </div>
 
-        <fieldset className="form-fieldset" disabled={busy}>
+        <fieldset className="form-fieldset" disabled={busy || savedChangesPending !== null}>
           <StepFields step={activeStep} form={form} updateField={updateField} />
         </fieldset>
 
@@ -1048,15 +1255,31 @@ export default function Home() {
         {error ? <div className="form-error">{error}</div> : null}
         {currentErrors.length > 0 ? <div className="form-hint">{currentErrors[0]}</div> : null}
 
+        {savedChangesPending !== null ? (
+          <div className="form-error" role="alert">
+            Your answers are saved, but the updated plan is not ready yet.
+            <button className="text-button" type="button" disabled={busy} onClick={retrySavedPlan}>
+              Retry generating the plan
+            </button>
+          </div>
+        ) : null}
+
         <div className="action-stack">
-          <button className="primary-button" type="button" disabled={busy} onClick={continueStep}>
+          <button className="primary-button" type="button" disabled={busy || savedChangesPending !== null} onClick={continueStep}>
             {generating
               ? "Generating..."
-              : activeStep === questionSteps.length - 1
+              : editing && activeStep === questionSteps.length - 1
+                ? "Save and update plan"
+                : activeStep === questionSteps.length - 1
                 ? "Generate my plan"
                 : "Continue"}
           </button>
-          <button className="text-button" type="button" disabled={activeStep === 0 || busy} onClick={backStep}>
+          {editing ? (
+            <button className="text-button" type="button" disabled={busy} onClick={cancelEditing}>
+              Cancel editing
+            </button>
+          ) : null}
+          <button className="text-button" type="button" disabled={activeStep === 0 || busy || savedChangesPending !== null} onClick={backStep}>
             Back
           </button>
         </div>
