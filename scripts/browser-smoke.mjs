@@ -21,6 +21,7 @@ let browser;
 let page;
 let cleanupError;
 let reportScreenshotsSaved = false;
+let discountDismissals = 0;
 
 function log(message) {
   const line = `${new Date().toISOString()} ${message}`;
@@ -44,6 +45,12 @@ try {
   browser = await chromium.launch({ headless: true, ...(existsSync(executablePath) ? { executablePath } : {}) });
   page = await browser.newPage();
   page.setDefaultTimeout(7_000);
+  const discountOffer = page.getByRole("dialog", { name: "Discount offer", exact: true });
+  const dismissDiscountOffer = async (dialog) => {
+    await dialog.getByRole("button", { name: "Maybe later", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    discountDismissals += 1;
+  };
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Start" }).click();
   await recordCurrentSession();
@@ -65,7 +72,18 @@ try {
   await openRestoredFunnelAt("Which biological sex should we use for the estimate?");
 
   await page.getByRole("button", { name: /Female/ }).click();
-  await page.getByRole("button", { name: "Continue" }).click();
+  const genderSaveResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/assessment" &&
+    response.request().method() === "PATCH" &&
+    response.request().postDataJSON()?.sessionId === firstSessionId &&
+    response.request().postDataJSON()?.data?.gender === "female"
+  );
+  const [savedGender] = await Promise.all([
+    genderSaveResponse,
+    page.getByRole("button", { name: "Continue" }).click(),
+  ]);
+  if (savedGender.status() !== 200) throw new Error(`gender save failed before reload: ${savedGender.status()}`);
+  await page.getByRole("heading", { name: "How old are you?", exact: true }).waitFor();
   await page.reload({ waitUntil: "networkidle" });
   await openRestoredFunnelAt("How old are you?");
   if ((await currentSessionId()) !== firstSessionId) throw new Error("reload changed the anonymous session");
@@ -119,6 +137,19 @@ try {
   await page.getByLabel("Email").fill("browser@example.com");
   await page.getByRole("button", { name: "View my report" }).click();
   await page.getByRole("region", { name: "Payment offer" }).waitFor();
+  // Exercise the real exit-intent listener before any results-page reload can set its storage flag.
+  const dismissalsBeforeExitIntent = discountDismissals;
+  await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    document.dispatchEvent(new MouseEvent("mouseleave", { clientY: 0 }));
+  });
+  await discountOffer.waitFor({ state: "visible" });
+  await dismissDiscountOffer(discountOffer);
+  if (discountDismissals !== dismissalsBeforeExitIntent + 1) throw new Error("exit-intent offer was not dismissed through Maybe later before plan selection");
+  // Register only after the explicit appearance/dismissal test, so it cannot consume that assertion.
+  await page.addLocatorHandler(discountOffer, dismissDiscountOffer);
+  await page.getByRole("button", { name: /12-week plan/ }).click();
+
   await page.getByText(/Model wellness-v2/).waitFor();
 
   const droppedPatchSessionId = await prepareBlankSession(page);
@@ -145,8 +176,6 @@ try {
   await page.evaluate((id) => window.localStorage.setItem("vitalpath-session-id", id), droppedPaySessionId);
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("region", { name: "Payment offer" }).waitFor();
-  const payExitOffer = page.getByRole("dialog", { name: "Discount offer" });
-  if (await payExitOffer.isVisible().catch(() => false)) await payExitOffer.getByRole("button", { name: "Maybe later" }).click();
   const payBodies = [];
   await page.route("**/api/pay", async (route) => {
     if (route.request().method() !== "POST") { await route.continue(); return; }
@@ -319,8 +348,6 @@ try {
     await page.evaluate((sessionId) => window.localStorage.setItem("vitalpath-session-id", sessionId), id);
     await page.reload({ waitUntil: "networkidle" });
     await page.getByRole("region", { name: "Payment offer" }).waitFor();
-    const exitOffer = page.getByRole("dialog", { name: "Discount offer" });
-    if (await exitOffer.isVisible().catch(() => false)) await exitOffer.getByRole("button", { name: "Maybe later" }).click();
     await page.getByRole("button", { name: testCase.planLabel }).click();
     let postedPlan;
     const capturePay = (request) => { if (request.url().endsWith("/api/pay") && request.method() === "POST") postedPlan = request.postDataJSON()?.plan; };
@@ -331,7 +358,7 @@ try {
     if (postedPlan !== testCase.plan) throw new Error(`${testCase.name} CTA used ${postedPlan}, expected ${testCase.plan}`);
   }
 
-  log(`Browser smoke passed session=${firstSessionId} staleStatus=${staleStatus} payPosts=${payCount} log=${logPath}`);
+  log(`Browser smoke passed session=${firstSessionId} staleStatus=${staleStatus} payPosts=${payCount} discountDismissals=${discountDismissals} log=${logPath}`);
 } catch (error) {
   if (page) {
     try { log(`page=${(await page.locator("body").innerText()).slice(0, 1000)}`); } catch { /* page may already be closed */ }
