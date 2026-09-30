@@ -228,9 +228,11 @@ async function assertSingleSubscription(userId, expected) {
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
-    const result = await client.query('SELECT "status", "plan", "paidAt" FROM "subscriptions" WHERE "userId" = $1', [userId]);
-    if (result.rowCount !== 1 || result.rows[0].status !== expected.subscriptionStatus || result.rows[0].plan !== expected.plan || !result.rows[0].paidAt) {
-      throw new Error(`pay replay did not leave one stable subscription: rows=${result.rowCount}`);
+    const result = await client.query('SELECT "status", "plan", "paidAt" AT TIME ZONE \'UTC\' AS "paidAt" FROM "subscriptions" WHERE "userId" = $1', [userId]);
+    const row = result.rows[0];
+    const actualPaidAt = row?.paidAt ? new Date(row.paidAt).toISOString() : null;
+    if (result.rowCount !== 1 || row.status !== expected.subscriptionStatus || row.plan !== expected.plan || actualPaidAt !== expected.paidAt) {
+      throw new Error(`pay replay did not leave one stable subscription: rows=${result.rowCount}, expectedPaidAt=${expected.paidAt ?? "null"}, actualPaidAt=${actualPaidAt ?? "null"}`);
     }
   } finally {
     await client.end();
