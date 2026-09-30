@@ -45,3 +45,17 @@ weight += (intake − expenditure) / 7700
 `Result.calculationDetails` stores the method, policy version, REE, TDEE, actual energy difference, projection status and assumptions for paid reports. Free responses expose only general method/range information and never expose exact calories, dates or calculation details.
 
 The model keeps Mifflin and the conservative product support domain because they are explainable and testable. Clinical guidance such as the [AHA/ACC/TOS obesity guideline](https://pmc.ncbi.nlm.nih.gov/articles/PMC5819889/) and the [NHLBI evidence review](https://www.nhlbi.nih.gov/sites/default/files/media/docs/obesity-evidence-review.pdf) (pp. 70–71, examples of individualized calorie ranges and adjustment by weight/activity) is context for the product's safety boundary, not evidence that this demo's 1,200/1,500 kcal floors are safe for every person or that it gives medical advice. A complete Hall implementation would require additional calibration and independent validation; an unlicensed public rewrite was reviewed but not copied or treated as validation evidence.
+
+## Focused verification
+
+The product-domain regression in `tests/health-domain.test.ts` runs 3,240 deterministic scenarios: 2 genders × 4 activity levels × 3 paces × 5 goal categories (loss, gain, maintenance, declining toning, and equal-weight toning) × 3 ages × 3 heights × 3 current BMI values. Unsupported scenarios are executed and counted as explicit threshold or calorie-range rejections; the latest run accepted 2,707 and rejected 533, with every category containing both outcomes.
+
+The test oracle is test-only and independent of `lib/health.ts`: it uses its own activity and policy tables, the algebraic fixed point `W* = (intake / m − C) / 10`, `q = 1 − 10m / 7700`, and `W(n) = W* + (W0 − W*)qⁿ`. It solves the first qualifying integer day with logarithms and checks the adjacent days directly; it does not call production helpers or reproduce the production daily loop. Targets for the 364/365/366-day cutoff use midpoints between adjacent analytical weights so the comparison is away from a floating-point threshold.
+
+The same focused suite checks missing and non-finite numbers, integer/range edges, BMI boundaries, enum and eligibility failures, every goal direction, UTC date rollover across a leap day, policy direction, deterministic non-mutation, the 5,000 kcal upper gate, and finite/integer result invariants. These are representative points in the supported numeric domain, not an exhaustive proof over every real-valued input and not clinical validation.
+
+Run the one-key algorithm check with:
+
+```sh
+npm test -- --maxWorkers=1 lib/health.test.ts tests/health-v2.test.ts tests/health-domain.test.ts
+```
