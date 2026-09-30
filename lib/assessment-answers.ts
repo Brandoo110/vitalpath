@@ -199,6 +199,13 @@ export async function upsertAssessmentAnswers(
       throw new Error(`Question definition is inactive or has an incompatible type for ${key}`);
     }
 
+    if (value === null) {
+      await tx.assessmentAnswer.deleteMany({
+        where: { assessmentId, questionId: question.id },
+      });
+      continue;
+    }
+
     const data = answerValueData(key, value);
     await tx.assessmentAnswer.upsert({
       where: {

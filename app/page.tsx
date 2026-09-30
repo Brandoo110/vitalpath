@@ -60,15 +60,15 @@ type AssessmentPayload = Partial<{
   weightKg: number;
   targetWeightKg: number;
   goal: Goal;
-  pacePreference: PacePreference;
+  pacePreference: PacePreference | null;
   activityLevel: ActivityLevel;
-  workoutDaysPerWeek: number;
-  sessionMinutes: number;
-  workoutLocation: WorkoutLocation;
-  dietPreference: DietPreference;
-  sleepHours: number;
-  stressLevel: StressLevel;
-  mainBarrier: MainBarrier;
+  workoutDaysPerWeek: number | null;
+  sessionMinutes: number | null;
+  workoutLocation: WorkoutLocation | null;
+  dietPreference: DietPreference | null;
+  sleepHours: number | null;
+  stressLevel: StressLevel | null;
+  mainBarrier: MainBarrier | null;
   healthDataConsent: boolean;
   wellnessEligible: boolean;
 }>;
@@ -484,9 +484,12 @@ export default function Home() {
       } catch {
         throw new ApiClientError("We could not confirm whether your answers were saved. Your draft is preserved. Retry using the same saved version.", 0, "save_unconfirmed");
       }
-      const matches = Object.entries(data).every(([field, value]) =>
-        (field === "healthDataConsent" ? latest.healthDataConsent : latest.assessment?.[field as keyof AssessmentPayload]) === value,
-      );
+      const matches = Object.entries(data).every(([field, value]) => {
+        const savedValue = field === "healthDataConsent"
+          ? latest.healthDataConsent
+          : latest.assessment?.[field as keyof AssessmentPayload];
+        return value === null ? savedValue === undefined : savedValue === value;
+      });
       if (latest.version >= expectedVersion && matches) return latest;
       if (latest.version !== expectedVersion) {
         throw new ApiClientError("Your saved answers changed elsewhere. Your current draft is preserved.", 409, "version_conflict");
@@ -544,11 +547,6 @@ export default function Home() {
       setStatus(activeStep === questionSteps.length - 1 ? "Generating plan" : "Saving answer");
 
       const data = payloadForStep(activeStep, form);
-      if (Object.keys(data).length === 0 && activeStep < questionSteps.length - 1) {
-        setActiveStep((step) => step + 1);
-        setStatus("Optional step skipped");
-        return;
-      }
       const body = await saveAnswers(data, activeStep + 1, version);
 
       setVersion(body.version);
@@ -2261,7 +2259,9 @@ function planSubhead(
 function payloadForStep(step: number, form: FormState): AssessmentPayload {
   const payload = rawPayloadForStep(step, form);
   for (const field of optionalFields) {
-    if (form[field] === "") delete payload[field as keyof AssessmentPayload];
+    if (Object.prototype.hasOwnProperty.call(payload, field) && form[field] === "") {
+      (payload as Record<string, unknown>)[field] = null;
+    }
   }
   return payload;
 }

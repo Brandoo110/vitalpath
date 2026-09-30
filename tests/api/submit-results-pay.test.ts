@@ -527,6 +527,60 @@ describe("submit, results and pay API", () => {
     expect(user.subscription?.status).toBe("active");
   });
 
+  it("rebuilds_a_paid_report_without_a_cleared_optional_answer_or_new_payment", async () => {
+    const sessionId = await createSessionId();
+    await saveCompleteAssessment(sessionId);
+    await submitAssessment(jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 1 }));
+    const payment = await pay(jsonRequest("POST", "/api/pay", { sessionId, plan: "monthly" }));
+    const paymentBody = await payment.json();
+
+    const cleared = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 8,
+      version: 1,
+      data: { sleepHours: null },
+    }));
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json()).version).toBe(2);
+
+    const stale = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionId}`));
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).error).toBe("assessment_stale");
+
+    const regenerated = await submitAssessment(
+      jsonRequest("POST", "/api/assessment/submit", { sessionId, version: 2 }),
+    );
+    expect(regenerated.status).toBe(200);
+
+    const paid = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionId}`));
+    const paidBody = await paid.json();
+    expect(paid.status).toBe(200);
+    expect(paidBody.needPaywall).toBe(false);
+    expect(paidBody.result.plan.basis).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "sleepHours", source: "default", value: "Not provided" }),
+    ]));
+
+    const repeatClear = await patchAssessment(jsonRequest("PATCH", "/api/assessment", {
+      sessionId,
+      step: 8,
+      version: 2,
+      data: { sleepHours: null },
+    }));
+    expect(repeatClear.status).toBe(200);
+    expect(await repeatClear.json()).toMatchObject({ version: 2, completed: true });
+    const repeatedReport = await getResults(new Request(`http://localhost/api/results?sessionId=${sessionId}`));
+    const repeatedReportBody = await repeatedReport.json();
+    expect(repeatedReport.status).toBe(200);
+    expect(repeatedReportBody.report.id).toBe(paidBody.report.id);
+    expect(repeatedReportBody.result.plan.basis).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "sleepHours", source: "default", value: "Not provided" }),
+    ]));
+
+    const replayPayment = await pay(jsonRequest("POST", "/api/pay", { sessionId, plan: "monthly" }));
+    expect(replayPayment.status).toBe(200);
+    expect((await replayPayment.json()).paidAt).toBe(paymentBody.paidAt);
+  });
+
   it("keeps_reports_and_subscription_access_isolated_between_sessions", async () => {
     const sessionA = await createSessionId();
     const sessionB = await createSessionId();
